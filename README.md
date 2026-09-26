@@ -4,6 +4,8 @@
 
 Sichiray EMG PRO 8채널 암밴드를 위한 멀티 윈도우 작업대입니다. 근전도(EMG) 신호를 실시간으로 받아 시각화하고 노이즈를 필터링합니다. 웹캠 기반 3D 손 인식 모델(WiLoR)을 정답(Ground Truth)으로 삼아 **EMG -> 손 자세 예측 모델**을 현장에서 바로 학습할 수 있습니다.
 
+![EMG Studio 화면: 3D 손과 EMG 복원, 스펙트로그램과 노이즈 진단, 필터, 원시 데이터, 센서 정보, 런처](assets/screenshots.jpg)
+
 ## 주요 기능 (Features)
 
 - **실시간 신호 모니터링:** 8채널 EMG 원시 데이터(HEX/ASCII)와 IMU 센서 데이터 스트리밍
