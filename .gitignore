@@ -1,0 +1,7 @@
+# runtime data (recordings, models, settings) - not source
+data/
+__pycache__/
+*.pyc
+.pytest_cache/
+# report build artefacts
+docs/report/_build/
