@@ -1,15 +1,15 @@
-"""Window 1: webcam with the detected hand skeleton drawn over it."""
+"""Window 1: webcam with the detected right hand's skeleton drawn over it."""
 from __future__ import annotations
 
-import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton, QSpinBox,
                                QVBoxLayout, QWidget)
 
-from .camera import BONES, FINGER_COLORS
+from ..hand.camera_link import HandFrame
+from ..hand.skeleton import BONES
 from .common import StudioWindow
-from .theme import BG, MUTED
+from .theme import BG, FINGER_COLORS, MUTED
 
 RESOLUTIONS = [(1280, 720), (640, 480), (1920, 1080)]
 
@@ -18,11 +18,10 @@ class VideoView(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.img: QImage | None = None
-        self.frame: dict | None = None
+        self.frame: HandFrame | None = None
         self.mirror = False
         self.show_bones = True
         self.show_box = True
-        self.follow: dict | None = None
         self.message = ""
         self.setMinimumSize(480, 270)
 
@@ -36,6 +35,7 @@ class VideoView(QWidget):
         iw, ih = self.img.width(), self.img.height()
         s = min(self.width() / iw, self.height() / ih)
         ox, oy = (self.width() - iw * s) / 2, (self.height() - ih * s) / 2
+        hands = self.frame.hands if self.frame else ()
         p.save()
         p.translate(ox, oy)
         p.scale(s, s)
@@ -44,32 +44,25 @@ class VideoView(QWidget):
             p.scale(-1, 1)
         p.drawImage(0, 0, self.img)
         p.setRenderHint(QPainter.Antialiasing)
-        for h in (self.frame or {}).get("hands", []):
-            chosen = h is self.follow
-            k = h["kp2d"]
+        for h in hands:
             if self.show_box:
-                x0, y0, x1, y1 = h["bbox"]
-                p.setPen(QPen(QColor("#ffffff" if chosen else "#868e96"), 2 / s * 1.5, Qt.DashLine))
+                x0, y0, x1, y1 = h.bbox
+                p.setPen(QPen(QColor("#ffffff"), 3 / s, Qt.DashLine))
                 p.drawRect(QRectF(x0, y0, x1 - x0, y1 - y0))
             if self.show_bones:
                 for a, b, f in BONES:
-                    p.setPen(QPen(QColor(FINGER_COLORS[f]), (4 if chosen else 2) / s))
-                    p.drawLine(QPointF(*k[a]), QPointF(*k[b]))
+                    p.setPen(QPen(QColor(FINGER_COLORS[f]), 4 / s))
+                    p.drawLine(QPointF(*h.kp2d[a]), QPointF(*h.kp2d[b]))
                 p.setPen(Qt.NoPen)
                 p.setBrush(QColor("#ffffff"))
-                r = (4 if chosen else 3) / s
-                for x, y in k:
-                    p.drawEllipse(QPointF(x, y), r, r)
+                for x, y in h.kp2d:
+                    p.drawEllipse(QPointF(x, y), 4 / s, 4 / s)
         p.restore()
-        # labels drawn unmirrored so the text stays readable
-        p.setFont(QFont("Malgun Gothic", 10, QFont.Bold))
-        for h in (self.frame or {}).get("hands", []):
-            x0, y0 = h["bbox"][0], h["bbox"][1]
-            if self.mirror:
-                x0 = iw - h["bbox"][2]
+        p.setFont(QFont("Malgun Gothic", 10, QFont.Bold))   # labels unmirrored, so they stay readable
+        for h in hands:
+            x0 = iw - h.bbox[2] if self.mirror else h.bbox[0]
             p.setPen(QColor("#ffffff"))
-            tag = ("오른손" if h["is_right"] else "왼손") + (" ●" if h is self.follow else "")
-            p.drawText(QPointF(ox + x0 * s, oy + y0 * s - 6), tag)
+            p.drawText(QPointF(ox + x0 * s, oy + h.bbox[1] * s - 6), "오른손" if h.is_right else "왼손")
 
 
 class CameraWindow(StudioWindow):
@@ -136,18 +129,17 @@ class CameraWindow(StudioWindow):
         frame, seq = cam.latest()
         if frame is not None and seq != self._seq and running:
             self._seq = seq
-            img = QImage.fromData(frame["jpeg"], "JPG")
+            img = QImage.fromData(frame.jpeg, "JPG")
             if not img.isNull():
                 self.view.img = img
             self.view.frame = frame
-            self.view.follow = cam.pick(frame)
-        self.view.message = cam.error or cam.status
+        status = cam.error or cam.status
+        self.view.message = status
         self.view.update()
         if frame and running:
-            ms = frame["ms"]
-            hands = ", ".join("오른손" if h["is_right"] else "왼손" for h in frame["hands"]) or "없음"
+            ms = frame.ms
             self.stats.setText(
-                f"카메라 {frame['cam_fps']:.0f} fps · 추론 {cam.rx_fps():.0f} fps · 검출 {ms['detect']:.0f} ms "
-                f"({'YOLO' if frame['how'] == 'yolo' else '추적'}) · WiLoR {ms['wilor']:.0f} ms · "
-                f"촬영→결과 지연 {frame['lag_ms']:.0f} ms · 손: {hands}")
-        self.status.setText(cam.error or cam.status)
+                f"카메라 {frame.cam_fps:.0f} fps · 추론 {cam.rx_fps():.0f} fps · 검출 {ms['detect']:.0f} ms "
+                f"({'YOLO' if frame.how == 'yolo' else '추적'}) · WiLoR {ms['wilor']:.0f} ms · "
+                f"촬영→결과 지연 {frame.lag_ms:.0f} ms · 오른손 {'있음' if frame.right_hand() else '없음'}")
+        self.status.setText(status)

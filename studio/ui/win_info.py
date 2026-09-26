@@ -9,14 +9,16 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QGridLayout, QHBoxLayout
                                QPushButton, QRadioButton, QSplitter, QVBoxLayout, QWidget)
 from PySide6.QtCore import Qt
 
-from .common import StudioWindow
-from .device import FRAME_LEN, HDR, IMU_NAMES, MODES, TAIL
+from ..device.parsers import HexParser
+from ..device.protocol import FIELD, FRAME_FIELDS, IMU_NAMES, spec_for
+from .common import STATE_LABEL, StudioWindow
 from .theme import GRADE_FG, MUTED, TEXT, mono
 
-# byte ranges of a HEX frame and their colours in the console
-FIELDS = [(0, 3, MUTED, "헤더 AA AA 5F"), (3, 7, "#66d9e8", "타임스탬프(ms)"), (7, 10, "#ffa94d", "가속도"),
-          (10, 13, "#ffd43b", "자이로"), (13, 16, "#da77f2", "각도"), (16, 96, TEXT, "EMG 10샘플×8ch"),
-          (96, 97, "#69db7c", "배터리"), (97, 98, MUTED, "꼬리 55")]
+# console colour and label per frame field (layout itself comes from device.protocol)
+FIELD_LOOK = {"header": (MUTED, "헤더 AA AA 5F"), "timestamp": ("#66d9e8", "타임스탬프(ms)"),
+              "acc": ("#ffa94d", "가속도"), "gyro": ("#ffd43b", "자이로"), "angle": ("#da77f2", "각도"),
+              "emg": (TEXT, "EMG 10샘플×8ch"), "battery": ("#69db7c", "배터리"), "tail": (MUTED, "꼬리 55")}
+FIELDS = [(lo, hi, *FIELD_LOOK[name]) for name, lo, hi in FRAME_FIELDS]
 BAD = "#ff6b6b"
 
 ROWS = [
@@ -139,7 +141,7 @@ class InfoWindow(StudioWindow):
         self.setCentralWidget(split)
         self.resize(1250, 820)
 
-        self.cursor = hub.link.bytes.total
+        self.cursor = hub.bytes_total()
         self.pend = bytearray()
 
     # ------------------------------------------------------------ counters
@@ -149,48 +151,48 @@ class InfoWindow(StudioWindow):
         lab.setStyleSheet(f"color: {GRADE_FG[grade]};" if grade and grade != "ok" else "")
 
     def refresh(self) -> None:
-        s = self.hub.link.snapshot()
-        m = s["mode"]
-        spec = MODES.get(m or "hex")
-        st = s["status"] + (f" — {s['error']}" if s["error"] else "")
-        self._set("source", f"{s['source'] or '-'}  ({st})", "bad" if s["error"] else None)
-        self._set("mode", f"{m.upper()}  {spec['bits']}-bit  명목 {spec['fs']:g} Hz" if m else "감지 대기")
-        self._set("uptime", f"{s['uptime']:.0f} s")
-        idle = s["idle"]
+        s = self.hub.snapshot()
+        m = s.mode
+        spec = spec_for(m)
+        st = STATE_LABEL[s.state] + (f" — {s.error}" if s.error else "")
+        self._set("source", f"{s.source or '-'}  ({st})", "bad" if s.error else None)
+        self._set("mode", f"{m.upper()}  {spec.bits}-bit  명목 {spec.fs:g} Hz" if m else "감지 대기")
+        self._set("uptime", f"{s.uptime:.0f} s")
+        idle = s.idle
         self._set("idle", "-" if idle is None else f"{idle * 1000:.0f} ms 전",
                   None if idle is None else "bad" if idle > 0.5 else None)
-        self._set("bytes", _fmt_bytes(s["bytes_total"]))
-        ratio = s["bps"] / spec["bps"] if m else 0
-        self._set("bps", f"{s['bps']:,.0f} B/s  (이론 {spec['bps']:,} · {ratio:.0%})",
+        self._set("bytes", _fmt_bytes(s.bytes_total))
+        ratio = s.bps / spec.bps if m else 0
+        self._set("bps", f"{s.bps:,.0f} B/s  (이론 {spec.bps:,} · {ratio:.0%})",
                   "warn" if m and ratio < 0.9 else None)
-        self._set("sps", f"{s['sps']:.0f} /s  (명목 {spec['fs']:g})",
-                  "warn" if m and s["sps"] < spec["fs"] * 0.9 else None)
-        self._set("frames", f"{s['frames_ok']:,}" if m == "hex" else "- (HEX 전용)")
-        self._set("resync", f"{s['resync_bytes']:,}" if m == "hex" else "-", "warn" if s["resync_bytes"] and m == "hex" else None)
-        self._set("lost", f"{s['lost_frames']:,}" if m == "hex" else "-", "warn" if s["lost_frames"] and m == "hex" else None)
-        self._set("irregular", f"{s['irregular_ts']:,}" if m == "hex" else "-",
-                  "warn" if s["irregular_ts"] and m == "hex" else None)
-        if s["ts_mean"] is not None and m == "hex":
-            self._set("tsgap", f"평균 {s['ts_mean']:.2f} / 최소 {s['ts_min']} / 최대 {s['ts_max']} ms (정상 20)",
-                      "warn" if s["ts_max"] != 20 or s["ts_min"] != 20 else None)
+        self._set("sps", f"{s.sps:.0f} /s  (명목 {spec.fs:g})",
+                  "warn" if m and s.sps < spec.fs * 0.9 else None)
+        self._set("frames", f"{s.frames_ok:,}" if m == "hex" else "- (HEX 전용)")
+        self._set("resync", f"{s.resync_bytes:,}" if m == "hex" else "-", "warn" if s.resync_bytes and m == "hex" else None)
+        self._set("lost", f"{s.lost_frames:,}" if m == "hex" else "-", "warn" if s.lost_frames and m == "hex" else None)
+        self._set("irregular", f"{s.irregular_ts:,}" if m == "hex" else "-",
+                  "warn" if s.irregular_ts and m == "hex" else None)
+        if s.ts_mean is not None and m == "hex":
+            self._set("tsgap", f"평균 {s.ts_mean:.2f} / 최소 {s.ts_min} / 최대 {s.ts_max} ms (정상 20)",
+                      "warn" if s.ts_max != 20 or s.ts_min != 20 else None)
         else:
             self._set("tsgap", "-")
-        self._set("ts", f"{s['last_ts']:,} ms" if s["last_ts"] is not None else "-")
-        self._set("lines", f"{s['lines_ok']:,} / {s['lines_bad']:,}" if m == "ascii" else "- (ASCII 전용)",
-                  "warn" if s["lines_bad"] and m == "ascii" else None)
-        b = s["battery"]
+        self._set("ts", f"{s.last_ts:,} ms" if s.last_ts is not None else "-")
+        self._set("lines", f"{s.lines_ok:,} / {s.lines_bad:,}" if m == "ascii" else "- (ASCII 전용)",
+                  "warn" if s.lines_bad and m == "ascii" else None)
+        b = s.battery
         self._set("battery", "-" if b is None else f"{b} %", None if b is None else "bad" if b < 10 else "warn" if b < 20 else None)
-        if s["imu"] and m == "hex":
-            self._set("imu", " ".join(f"{n}={v}" for n, v in zip(IMU_NAMES, s["imu"])))
+        if s.imu and m == "hex":
+            self._set("imu", " ".join(f"{n}={v}" for n, v in zip(IMU_NAMES, s.imu)))
         else:
             self._set("imu", "- (HEX 모드에서만 전송)")
-        self._set("modes", str(s["mode_changes"]))
+        self._set("modes", str(s.mode_changes))
 
-        h = np.array(self.hub.rate_hist) if self.hub.rate_hist else np.zeros((0, 3))
+        h = np.array(s.rate_history) if s.rate_history else np.zeros((0, 3))
         if len(h):
             self.c_bps.setData(h[:, 0], h[:, 1])
-        self.l_bps.setPos(spec["bps"])
-        bh = np.array(s["batt_hist"]) if s["batt_hist"] else np.zeros((0, 2))
+        self.l_bps.setPos(spec.bps)
+        bh = np.array(s.battery_history) if s.battery_history else np.zeros((0, 2))
         if len(bh):
             self.c_batt.setData(bh[:, 0], bh[:, 1])
         self.status.setText("ⓘ 표시가 있는 항목은 마우스를 올리면 설명이 나옵니다.")
@@ -203,7 +205,7 @@ class InfoWindow(StudioWindow):
         self.legend.setVisible(self.r_hex.isChecked())
 
     def _pump_console(self) -> None:
-        data, self.cursor = self.hub.link.bytes.since(self.cursor)
+        data, self.cursor = self.hub.bytes_since(self.cursor)
         if self.freeze.isChecked():
             self.pend.clear()
             return
@@ -222,27 +224,8 @@ class InfoWindow(StudioWindow):
             out = [" ".join(f"{b:02X}" for b in p[i:i + 32]) for i in range(0, n, 32)]
             del p[:n]
             return out
-        while True:
-            i = p.find(HDR)
-            if i < 0:
-                if len(p) > 4096:  # nothing frame-like: flush as plain rows
-                    out.append(self._span(p[:-2], BAD))
-                    del p[:-2]
-                break
-            if i > 0:
-                out.append(self._span(p[:i], BAD))
-                del p[:i]
-            if len(p) < FRAME_LEN:
-                break
-            if p[FRAME_LEN - 1] == TAIL:
-                out.append(self._frame_html(bytes(p[:FRAME_LEN])))
-                del p[:FRAME_LEN]
-                continue
-            j = p.find(HDR, 3)   # broken frame: show it up to the next header
-            end = j if j > 0 else len(p)
-            out.append(self._span(p[:end], BAD))
-            del p[:end]
-        return out
+        # same frame boundaries as the parser
+        return [self._frame_html(b) if kind == "frame" else self._span(b, BAD) for kind, b in HexParser.segment(p)]
 
     @staticmethod
     def _span(b: bytes, color: str) -> str:
@@ -252,8 +235,8 @@ class InfoWindow(StudioWindow):
     def _frame_html(b: bytes) -> str:
         parts = []
         for lo, hi, color, _ in FIELDS:
-            if lo == 16:  # EMG: group each 8-channel sample
-                groups = [" ".join(f"{x:02X}" for x in b[k:k + 8]) for k in range(16, 96, 8)]
+            if lo == FIELD["emg"].start:  # EMG: group each 8-channel sample
+                groups = [" ".join(f"{x:02X}" for x in b[k:k + 8]) for k in range(lo, hi, 8)]
                 parts.append(f"<span style='color:{color}'>{' │ '.join(groups)}</span>")
             else:
                 parts.append(f"<span style='color:{color}'>{' '.join(f'{x:02X}' for x in b[lo:hi])}</span>")

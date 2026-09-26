@@ -16,6 +16,7 @@ MUTED = "#8a909c"
 GRID = "#2c313a"
 
 # eight channels, evenly spaced hues, similar lightness so none dominates
+FINGER_COLORS = ["#ff6b6b", "#ffd43b", "#69db7c", "#4dabf7", "#da77f2"]   # thumb .. little
 CH_COLORS = ["#ff6b6b", "#ffa94d", "#ffd43b", "#8ce99a", "#3bc9db", "#74c0fc", "#b197fc", "#f783ac"]
 GRADE_BG = {"ok": "#1f4d2e", "warn": "#6b5315", "bad": "#6e1f24", "info": "#23262d"}
 GRADE_FG = {"ok": "#b2f2bb", "warn": "#ffe8a3", "bad": "#ffc9c9", "info": TEXT}

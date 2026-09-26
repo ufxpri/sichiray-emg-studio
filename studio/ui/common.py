@@ -6,7 +6,8 @@ import time
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QLabel, QMainWindow
 
-from .hub import Hub
+from ..core.hub import Hub
+from ..device.protocol import LinkState
 from .theme import MUTED
 
 
@@ -56,4 +57,8 @@ class StudioWindow(QMainWindow):
         if not m:
             return "데이터 대기 중"
         s = self.hub.spec
-        return f"{m.upper()}  {s['bits']}-bit  {s['fs']:g} Hz"
+        return f"{m.upper()}  {s.bits}-bit  {s.fs:g} Hz"
+
+
+STATE_LABEL = {LinkState.DISCONNECTED: "끊김", LinkState.CONNECTING: "연결 중",
+               LinkState.CONNECTED: "연결됨", LinkState.ERROR: "오류"}

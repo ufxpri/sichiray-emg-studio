@@ -1,7 +1,7 @@
 """Window 6: the global filter chain and calibration. Changes apply to every window at once."""
 from __future__ import annotations
 
-import copy
+from dataclasses import replace
 
 import numpy as np
 import pyqtgraph as pg
@@ -9,11 +9,11 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QScrollArea,
                                QSpinBox, QVBoxLayout, QWidget, QSplitter)
-from scipy.signal import sosfreqz, welch
+from scipy.signal import welch
 
+from ..core.settings import FilterSpec
+from ..device.protocol import CH
 from .common import StudioWindow
-from .device import CH
-from .pipeline import Settings
 from .theme import CH_COLORS, MUTED
 
 HELP = {
@@ -222,30 +222,30 @@ class FilterWindow(StudioWindow):
 
     # ------------------------------------------------------------ settings <-> widgets
     def _load(self) -> None:
-        s = self.hub.settings
+        s, f = self.hub.settings, self.hub.filter
         self._loading = True
-        self.hp_on.setChecked(s.hp_on)
-        self.hp_hz.setValue(s.hp_hz)
-        self.hp_ord.setValue(s.hp_order)
-        self.lp_on.setChecked(s.lp_on)
-        self.lp_hz.setValue(s.lp_hz)
-        self.lp_ord.setValue(s.lp_order)
-        self.n_on.setChecked(s.notch_on)
-        self.n_base.setCurrentText(f"{s.notch_base:g}")
-        self.n_harm.setValue(s.notch_harm)
-        self.n_q.setValue(s.notch_q)
-        if self._parse_extra() != list(s.extra_notches):
-            self.extra.setText(", ".join(f"{f:g}" for f in s.extra_notches))
-        self.rotate.setValue(s.rotate)
+        self.hp_on.setChecked(f.hp_on)
+        self.hp_hz.setValue(f.hp_hz)
+        self.hp_ord.setValue(f.hp_order)
+        self.lp_on.setChecked(f.lp_on)
+        self.lp_hz.setValue(f.lp_hz)
+        self.lp_ord.setValue(f.lp_order)
+        self.n_on.setChecked(f.notch_on)
+        self.n_base.setCurrentText(f"{f.notch_base:g}")
+        self.n_harm.setValue(f.notch_harm)
+        self.n_q.setValue(f.notch_q)
+        if self._parse_extra() != f.extra_notches:
+            self.extra.setText(", ".join(f"{v:g}" for v in f.extra_notches))
+        self.rotate.setValue(f.rotate)
         for c, cb in enumerate(self.mutes):
-            cb.setChecked(bool(s.mute[c]))
+            cb.setChecked(bool(f.mute[c]))
         self.env_hz.setValue(s.env_hz)
         self._loading = False
-        self.notes.setText("\n".join(self.hub.pipe.notes))
+        self.notes.setText("\n".join(self.hub.filter_notes()))
         self._draw_response()
         self._cal_summary()
 
-    def _parse_extra(self) -> list[float]:
+    def _parse_extra(self) -> tuple[float, ...]:
         out = []
         for tok in self.extra.text().replace(";", ",").split(","):
             try:
@@ -254,28 +254,23 @@ class FilterWindow(StudioWindow):
                 continue
             if v > 0:
                 out.append(v)
-        return out
+        return tuple(out)
 
     def _changed(self, *_) -> None:
         if not self._loading:
             self._debounce.start()
 
     def _commit(self) -> None:
-        s = copy.deepcopy(self.hub.settings)
-        s.hp_on, s.hp_hz, s.hp_order = self.hp_on.isChecked(), self.hp_hz.value(), self.hp_ord.value()
-        s.lp_on, s.lp_hz, s.lp_order = self.lp_on.isChecked(), self.lp_hz.value(), self.lp_ord.value()
-        s.notch_on, s.notch_base = self.n_on.isChecked(), float(self.n_base.currentText())
-        s.notch_harm, s.notch_q = self.n_harm.value(), self.n_q.value()
-        s.extra_notches = self._parse_extra()
-        s.rotate = self.rotate.value()
-        s.mute = [cb.isChecked() for cb in self.mutes]
-        s.env_hz = self.env_hz.value()
-        self.hub.apply(s)
+        spec = FilterSpec(
+            hp_on=self.hp_on.isChecked(), hp_hz=self.hp_hz.value(), hp_order=self.hp_ord.value(),
+            lp_on=self.lp_on.isChecked(), lp_hz=self.lp_hz.value(), lp_order=self.lp_ord.value(),
+            notch_on=self.n_on.isChecked(), notch_base=float(self.n_base.currentText()),
+            notch_harm=self.n_harm.value(), notch_q=self.n_q.value(), extra_notches=self._parse_extra(),
+            rotate=self.rotate.value(), mute=tuple(cb.isChecked() for cb in self.mutes))
+        self.hub.apply(replace(self.hub.settings, filter=spec, env_hz=self.env_hz.value()))
 
     def _defaults(self) -> None:
-        d = Settings()
-        d.rest, d.mvc = self.hub.settings.rest, self.hub.settings.mvc
-        self.hub.apply(d)
+        self.hub.apply(replace(self.hub.settings, filter=FilterSpec(), env_hz=5.0))
 
     # ------------------------------------------------------------ calibration
     def _calib(self, kind: str) -> None:
@@ -290,36 +285,31 @@ class FilterWindow(StudioWindow):
         self.cal_bar.setValue(int(frac * 100))
 
     def _cal_summary(self) -> None:
-        s = self.hub.settings
+        s = self.hub.settings.calib
         f = lambda xs: " ".join(f"{v:.1f}" for v in xs) if xs else "없음"
         self.cal_text.setText(f"휴식 포락선: {f(s.rest)}\n최대 포락선: {f(s.mvc)}")
 
     # ------------------------------------------------------------ plots
     def _draw_response(self) -> None:
         fs = self.hub.fs
-        sos = self.hub.pipe.sos
-        if len(sos):
-            w, h = sosfreqz(sos, worN=2048, fs=fs)
-            self.c_resp.setData(w, 20 * np.log10(np.maximum(np.abs(h), 1e-6)))
-        else:
-            self.c_resp.setData([0, fs / 2], [0, 0])
+        self.c_resp.setData(*self.hub.filter_response())
         self.p_resp.setXRange(0, fs / 2, padding=0)
 
     def on_mode_change(self) -> None:
         self._load()
 
     def refresh(self) -> None:
-        hub, fs, c = self.hub, self.hub.fs, self.ch.currentIndex()
+        st, fs, c = self.hub.streams, self.hub.fs, self.ch.currentIndex()
         self.info.setText(self.mode_text())
         n2, n4 = int(2 * fs), int(4 * fs)
-        pre, post, env = hub.pre.last(n2), hub.filt.last(n2), hub.env.last(n2)
+        pre, post, env = st.pre.last(n2), st.filt.last(n2), st.env.last(n2)
         if len(pre) and len(pre) == len(post) == len(env):
             x = (np.arange(len(pre)) - len(pre)) / fs
             p0 = pre[:, c] - pre[:, c].mean()
             self.c_pre.setData(x, p0)
             self.c_post.setData(x, post[:, c])
             self.c_env.setData(x, env[:, c])
-        pre4, post4 = hub.pre.last(n4), hub.filt.last(n4)
+        pre4, post4 = st.pre.last(n4), st.filt.last(n4)
         if len(pre4) >= 64 and len(pre4) == len(post4):
             nper = min(len(pre4), 512 if fs > 200 else 64)
             f, a = welch(pre4[:, c] - pre4[:, c].mean(), fs=fs, nperseg=nper)
@@ -327,11 +317,11 @@ class FilterWindow(StudioWindow):
             self.c_psd_pre.setData(f, 10 * np.log10(a + 1e-9))
             self.c_psd_post.setData(f, 10 * np.log10(b + 1e-9))
             self.p_psd.setXRange(0, fs / 2, padding=0)
-        e = hub.env.last(max(1, int(0.2 * fs)))
+        e = st.env.last(max(1, int(0.2 * fs)))
         if len(e):
             cur = e.mean(axis=0)
             self.bars.setOpts(height=cur)
-            s = hub.settings
+            s = self.hub.settings.calib
             if s.rest:
                 self.rest_marks.setData(np.arange(CH), s.rest)
             else:
@@ -340,7 +330,7 @@ class FilterWindow(StudioWindow):
                 self.mvc_marks.setData(np.arange(CH), s.mvc)
             else:
                 self.mvc_marks.clear()
-            nrm = hub.norm.last(1)
+            nrm = st.norm.last(1)
             top = max(float(cur.max()), max(s.mvc) if s.mvc else 0.0, 1.0)
             self.p_bar.setYRange(0, top * 1.25, padding=0)
             for k, t in enumerate(self.bar_txt):

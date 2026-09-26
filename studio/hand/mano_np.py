@@ -1,8 +1,8 @@
 """MANO right hand in plain numpy, so the studio can draw a mesh for any pose
 (e.g. one predicted from EMG) without PyTorch.
 
-The parameter file is exported once by hand_worker.py from the same smplx layer
-WiLoR uses (~/.emg_hand/mano_right_np.npz). Standard linear blend skinning,
+The parameter file is exported once by worker/hand_worker.py (--mano-out) from
+the same smplx layer WiLoR uses (config.MANO_NPZ). Standard linear blend skinning,
 rotation-matrix input, no pose mean added (as smplx.MANOLayer with pose2rot=False).
 Joints come out in the 21-point OpenPose order WiLoR reports.
 """
@@ -12,7 +12,7 @@ import os
 
 import numpy as np
 
-PATH = os.path.join(os.path.expanduser("~"), ".emg_hand", "mano_right_np.npz")
+from ..config import MANO_NPZ as PATH
 
 
 def rodrigues(rv: np.ndarray) -> np.ndarray:
@@ -68,3 +68,14 @@ class Mano:
         verts = np.einsum("vij,vj->vi", A[:, :3, :3], v_posed) + A[:, :3, 3]
         joints = np.vstack([posed_J, verts[self.tips]])[self.joint_map]
         return verts, joints
+
+
+_shared: Mano | None = None
+
+
+def get_mano() -> Mano | None:
+    """The one shared model, loaded on first use; None until the worker has exported it."""
+    global _shared
+    if _shared is None and Mano.available():
+        _shared = Mano()
+    return _shared

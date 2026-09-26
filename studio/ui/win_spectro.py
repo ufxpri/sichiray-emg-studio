@@ -10,9 +10,9 @@ from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QHBoxLayout, QHeaderView, QLabel, QSplitter,
                                QTableWidget, QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget, QCheckBox)
 
-from . import analysis
+from ..core import analysis
+from ..device.protocol import CH
 from .common import StudioWindow
-from .device import CH
 from .theme import CH_COLORS, GRADE_BG, GRADE_FG, MUTED
 
 HISTORY_S = 10.0
@@ -172,7 +172,8 @@ class SpectroWindow(StudioWindow):
         self._metric_t = 0.0
 
     def ring(self):
-        return self.hub.pre if self.source.currentIndex() == 0 else self.hub.filt
+        st = self.hub.streams
+        return st.pre if self.source.currentIndex() == 0 else st.filt
 
     # ------------------------------------------------------------ update
     def refresh(self) -> None:
@@ -215,13 +216,12 @@ class SpectroWindow(StudioWindow):
         fs = self.hub.fs
         n = int(METRIC_WINDOW_S * fs)
         sig = self.ring().last(n)
-        raw = self.hub.link.emg.last(n)
+        raw = self.hub.raw_logical_last(n)   # logical order, like the analysed source
         if len(sig) < max(64, fs) or len(raw) != len(sig):
             self.status.setText("진단표: 데이터가 4초 쌓이면 계산합니다.")
             return
-        raw = np.roll(raw, -self.hub.settings.rotate, axis=1)   # match logical channel order
         spec = self.hub.spec
-        ctx = dict(center=spec["center"], full=spec["full"], mode=self.hub.mode)
+        ctx = dict(center=spec.center, full=spec.full, mode=self.hub.mode)
         vals, grades, lines = analysis.compute(raw, sig, fs, ctx, self.hub.rest_rms())
         order = {"info": 0, "ok": 1, "warn": 2, "bad": 3}
         for c in range(CH):
@@ -235,7 +235,7 @@ class SpectroWindow(StudioWindow):
                 elif m.key == "line":
                     txt = "없음"
                 self._cell(i + 1, c, txt, grades[m.key][c])
-        rot = self.hub.settings.rotate
+        rot = self.hub.filter.rotate
         self.status.setText(f"진단표: 최근 {METRIC_WINDOW_S:g}초, 소스 = {self.source.currentText()}"
                             + (f", 채널 회전 +{rot} 적용(논리 채널 순서)" if rot else ""))
 

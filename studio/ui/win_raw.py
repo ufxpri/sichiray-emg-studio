@@ -6,7 +6,7 @@ import pyqtgraph as pg
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from .common import StudioWindow
-from .device import CH, IMU_NAMES
+from ..device.protocol import CH, IMU_NAMES
 from .theme import CH_COLORS, MUTED
 
 SPANS = [1, 2, 5, 10, 30]
@@ -84,7 +84,7 @@ class RawWindow(StudioWindow):
         self.imu_plot.setVisible(hex_mode)
 
     def _apply_y(self) -> None:
-        full = self.hub.spec["full"]
+        full = self.hub.spec.full
         for p in self.plots:
             if self.yscale.currentIndex() == 0:
                 p.disableAutoRange(axis="y")
@@ -93,9 +93,9 @@ class RawWindow(StudioWindow):
                 p.enableAutoRange(axis="y")
 
     def refresh(self) -> None:
-        link, fs = self.hub.link, self.hub.fs
+        fs = self.hub.fs
         span = SPANS[self.span.currentIndex()]
-        data = link.emg.last(int(span * fs))
+        data = self.hub.raw_last(int(span * fs))
         n = len(data)
         self.info.setText(f"{self.mode_text()}   ·   {n}샘플 표시")
         if not n:
@@ -108,7 +108,7 @@ class RawWindow(StudioWindow):
             self.values[c].setText(f"<span style='color:{CH_COLORS[c]}'>{int(data[-1, c])}</span>")
         self.plots[0].setXRange(-span, 0, padding=0)
         if self.hub.mode == "hex":
-            imu = link.imu.last(int(span * 50))
+            imu = self.hub.imu_last(int(span * 50))
             if len(imu):
                 xi = (np.arange(len(imu)) - len(imu)) / 50.0
                 for i in range(9):

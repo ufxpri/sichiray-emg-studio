@@ -13,9 +13,11 @@ Pipeline per frame
   detect           YOLO hand boxes, or the previous frame's keypoint box while
                    tracking (YOLO re-runs every --redetect frames or on loss)
   crop             256x256 patch per hand, anti-alias blur only inside the ROI
-  WiLoR            MANO pose/shape, 21 joints, 778 vertices. The 32 ViT blocks
-                   run as a captured CUDA graph: eager PyTorch on Windows is
-                   launch-bound (GPU ~2% busy); the graph cut 28 ms to 6 ms.
+  WiLoR            MANO pose/shape, 21 joints, 778 vertices. Backbone and refine
+                   net run as captured CUDA graphs: eager PyTorch on Windows is
+                   launch-bound (GPU ~2% busy); graphs cut the model 64 -> 23 ms.
+
+Must stay standalone: it runs in another interpreter and cannot import studio.
 Output: TCP, one client. Each message = u32 header length, u32 jpeg length,
 u32 blob length, header JSON, JPEG bytes, blob. The blob is float32 MANO vertices,
 778x3 per hand in header order. The first message is {"type": "hello", "faces": ...}.
@@ -37,7 +39,9 @@ import cv2
 import numpy as np
 
 warnings.filterwarnings("ignore")
-MODELS = os.environ.get("EMG_HAND_MODELS", os.path.join(os.path.expanduser("~"), ".emg_hand", "models"))
+PROTO = 1   # wire-format version; the studio checks it (studio/config.py HAND_PROTO)
+HOME = os.path.join(os.path.expanduser("~"), ".emg_hand")
+MODELS = os.path.join(HOME, "models")          # replaced by --models
 PATCH = 256
 MAX_HANDS = 2
 
@@ -99,12 +103,12 @@ class Camera:
 
 
 # --------------------------------------------------------------------- model
-def load_model(dtype_name: str):
+def load_model(dtype_name: str, models: str):
     import torch
     from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline
     dtype = torch.float16 if dtype_name == "fp16" else torch.float32
     pipe = WiLorHandPose3dEstimationPipeline(device=torch.device("cuda"), dtype=dtype,
-                                             wilor_pretrained_dir=MODELS, verbose=False)
+                                             wilor_pretrained_dir=models, verbose=False)
     m = pipe.wilor_model
     # constants live on the GPU so forward() never copies from the host
     m.IMAGE_MEAN = m.IMAGE_MEAN.to("cuda", dtype)
@@ -210,7 +214,7 @@ class GraphedModel:
 
 
 def export_mano(model, path: str) -> None:
-    """Dump the MANO layer's buffers as plain arrays for studio/mano_np.py."""
+    """Dump the MANO layer's buffers as plain arrays for studio/hand/mano_np.py."""
     mano = model.mano
     t = lambda name: getattr(mano, name).detach().float().cpu().numpy()
     np.savez_compressed(path, v_template=t("v_template"), shapedirs=t("shapedirs"), posedirs=t("posedirs"),
@@ -221,14 +225,14 @@ def export_mano(model, path: str) -> None:
 
 
 class HandEstimator:
-    def __init__(self, dtype_name: str, conf: float, redetect: int) -> None:
+    def __init__(self, dtype_name: str, conf: float, redetect: int, models: str = MODELS,
+                 mano_out: str = os.path.join(HOME, "mano_right_np.npz")) -> None:
         import torch
         self.torch = torch
-        self.pipe, self.dtype = load_model(dtype_name)
+        self.pipe, self.dtype = load_model(dtype_name, models)
         self.model = GraphedModel(self.pipe.wilor_model, self.dtype)
-        mano_path = os.path.join(os.path.dirname(MODELS), "mano_right_np.npz")
-        if not os.path.exists(mano_path):
-            export_mano(self.pipe.wilor_model, mano_path)
+        if not os.path.exists(mano_out):
+            export_mano(self.pipe.wilor_model, mano_out)
         self.conf = conf
         self.redetect = redetect
         self.track: list[tuple[np.ndarray, int]] = []   # (box, is_right) from last frame
@@ -327,6 +331,9 @@ def main() -> None:
     ap.add_argument("--redetect", type=int, default=5, help="run YOLO at least every N frames")
     ap.add_argument("--jpeg", type=int, default=80)
     ap.add_argument("--video", default="", help="read this file (looped) instead of a camera")
+    ap.add_argument("--models", default=MODELS, help="WiLoR/YOLO weights (downloaded here on first run)")
+    ap.add_argument("--mano-out", default=os.path.join(HOME, "mano_right_np.npz"),
+                    help="where to export MANO as plain arrays for the studio's numpy model")
     ap.add_argument("--bench", type=float, default=0, help="no server: run N seconds and print timings")
     args = ap.parse_args()
 
@@ -342,7 +349,7 @@ def main() -> None:
         send(conn, {"type": "status", "text": "모델 로딩 중 (약 10초)…"})
     try:
         t0 = time.time()
-        est = HandEstimator(args.dtype, args.conf, args.redetect)
+        est = HandEstimator(args.dtype, args.conf, args.redetect, args.models, args.mano_out)
         load_s = time.time() - t0
         cam = Camera(args.camera, args.width, args.height, args.fps, args.video)
     except Exception as e:  # report to the studio instead of dying silently
@@ -352,7 +359,7 @@ def main() -> None:
         sys.exit(1)
     log(f"model loaded in {load_s:.1f}s")
     if srv:
-        send(conn, {"type": "hello", "faces": est.faces(), "load_s": round(load_s, 1),
+        send(conn, {"type": "hello", "proto": PROTO, "faces": est.faces(), "load_s": round(load_s, 1),
                     "camera": args.camera, "device": est.torch.cuda.get_device_name(0)})
 
     seq, n, t_start = 0, 0, time.time()
