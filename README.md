@@ -1,6 +1,16 @@
 # EMG Studio
 
+Multi-window workbench for the **Sichiray EMG PRO** 8-channel EMG armband: live signal views, noise diagnosis, a global filter chain, webcam 3D hand tracking (WiLoR, GPU), and on-the-spot learning of **EMG → hand pose** with the camera as ground truth. (문서는 한국어입니다.)
+
 Sichiray EMG PRO 8채널 암밴드용 멀티 윈도우 작업대입니다. 암밴드 신호를 받아 보고, 필터링하고, 노이즈를 진단합니다. 웹캠으로 인식한 손을 정답으로 삼아 **EMG → 손 자세**를 현장에서 학습합니다.
+
+## 요구 사항
+
+- Windows 10/11, Python 3.12 (Studio)
+- 암밴드 USB 동글(CH340) 드라이버. 장치가 없으면 `--demo`로 합성 신호를 씁니다.
+- 카메라 손 인식은 NVIDIA GPU와 별도 Python 3.10 환경이 필요합니다(아래 설치 절). 없어도 나머지 창은 동작합니다.
+
+## 실행
 
 ```powershell
 python -m pip install -r requirements.txt
@@ -51,7 +61,7 @@ studio/
   pose/                  features, dataset, collector, models(릿지·MLP), evaluate(검증·우연 판정), trainer, learner
   ui/                    theme, common, gl_hand, win_* 6개, app(런처)
 tests/                   회귀 테스트
-data/                    실행 중 생기는 데이터 (git 제외)
+data/                    실행 중 생기는 설정·수집·모델 (git 제외)
 ```
 
 ## 카메라 손 인식 설치 (PC당 한 번, 약 7.5 GB)
@@ -70,7 +80,6 @@ uv pip install --python venv/Scripts/python.exe --no-deps "git+https://github.co
 
 - 모델(약 2.5 GB)은 첫 실행 때 `~/.emg_hand/models`로 자동으로 받습니다. 워커 로그는 `~/.emg_hand/worker.log`에 남습니다.
 - 다른 위치의 파이썬을 쓰려면 `EMG_HAND_PY` 환경 변수로 지정합니다.
-- **라이선스**: WiLoR과 MANO 손 모델은 비상업적 연구 용도로만 쓸 수 있습니다.
 
 ## 하드웨어 메모
 
@@ -85,4 +94,10 @@ HEX 프레임(98 B, 50 fps): `AA AA 5F | ts(4, BE ms) | Acc(3) Gyro(3) Angle(3) 
 
 CH340 드라이버가 없으면 Microsoft Update 카탈로그에서 `USB\VID_1A86&PID_7523`을 검색해 `wch.cn 3.9.2024.9`를 받아 `pnputil /add-driver CH341SER.INF /install`로 설치합니다.
 
-실험 기록과 결론은 상위 폴더의 `NOTES.md`에 있습니다.
+## 코드 주석의 `NOTES §n`
+
+프로젝트 실험 기록(장치 측정, 기각된 가설, 판정 근거)의 절 번호입니다. 이 기록은 저장소에 포함하지 않았습니다. 주석에는 결론만 옮겨 두었습니다.
+
+## 라이선스
+
+이 저장소의 코드는 [MIT](LICENSE)입니다. 손 인식에 쓰는 **WiLoR / WiLoR-mini** 가중치와 **MANO** 손 모델은 이 저장소에 들어 있지 않습니다. 첫 실행 때 각 배포처에서 내려받으며, **비상업적 연구 용도**라는 각자의 라이선스를 따릅니다. 상업적으로 쓰려면 해당 권리자의 허락이 필요합니다.

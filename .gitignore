@@ -1,7 +1,7 @@
-# runtime data (recordings, models, settings) - not source
+# runtime data (settings, pose recordings, models) - not source
 data/
+# internal report and screenshots (shared separately)
+docs/
 __pycache__/
 *.pyc
 .pytest_cache/
-# report build artefacts
-docs/report/_build/
