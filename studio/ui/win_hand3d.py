@@ -168,6 +168,10 @@ class Hand3DWindow(StudioWindow):
                            + ("  (수집 중)" if p.collecting else ""))
         self.b_train.setEnabled(not p.training)
         self.predict.setEnabled(p.model is not None)
+        if self.predict.isChecked() != p.predicting:   # the learner is the source of truth
+            self.predict.blockSignals(True)
+            self.predict.setChecked(p.predicting)
+            self.predict.blockSignals(False)
         self.report.setText(p.report or "아직 학습한 모델이 없습니다.")
         self.msg.setText(self._refusal or p.message)
         if self._refusal and time.monotonic() - self._refusal_t > 6:
