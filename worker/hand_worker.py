@@ -103,18 +103,25 @@ class Camera:
 
 
 # --------------------------------------------------------------------- model
+def pick_device():
+    """CUDA when there is one; otherwise the CPU (slow: a few frames per second at best,
+    fp32 only, no graphs), so the studio still works on a laptop without an NVIDIA GPU."""
+    import torch
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 def load_model(dtype_name: str, models: str):
     import torch
     from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline
-    dtype = torch.float16 if dtype_name == "fp16" else torch.float32
-    pipe = WiLorHandPose3dEstimationPipeline(device=torch.device("cuda"), dtype=dtype,
-                                             wilor_pretrained_dir=models, verbose=False)
+    dev = pick_device()
+    dtype = torch.float16 if dtype_name == "fp16" and dev.type == "cuda" else torch.float32
+    pipe = WiLorHandPose3dEstimationPipeline(device=dev, dtype=dtype, wilor_pretrained_dir=models, verbose=False)
     m = pipe.wilor_model
-    # constants live on the GPU so forward() never copies from the host
-    m.IMAGE_MEAN = m.IMAGE_MEAN.to("cuda", dtype)
-    m.IMAGE_STD = m.IMAGE_STD.to("cuda", dtype)
+    # constants live on the device so forward() never copies from the host
+    m.IMAGE_MEAN = m.IMAGE_MEAN.to(dev, dtype)
+    m.IMAGE_STD = m.IMAGE_STD.to(dev, dtype)
     make_capturable(m.backbone)
-    return pipe, dtype
+    return pipe, dtype, dev
 
 
 def make_capturable(vit) -> None:
@@ -159,13 +166,16 @@ class GraphedModel:
     net capture cleanly; smplx's MANO layer does not, so it stays eager (twice,
     ~4 ms each). Same math as wilor_mini's WiLor.forward."""
 
-    def __init__(self, model, dtype) -> None:
+    def __init__(self, model, dtype, device) -> None:
         import torch
-        self.torch, self.m, self.dtype = torch, model, dtype
+        self.torch, self.m, self.dtype, self.device = torch, model, dtype, device
         self.graphs: dict[tuple[str, int], tuple] = {}
 
     def _graph(self, name: str, fn, *inputs):
         torch = self.torch
+        if self.device.type != "cuda":      # no graphs on the CPU: plain eager call
+            with torch.no_grad():
+                return fn(*inputs)
         key = (name, inputs[0].shape[0])
         if key not in self.graphs:
             static = [t.clone() for t in inputs]
@@ -229,8 +239,8 @@ class HandEstimator:
                  mano_out: str = os.path.join(HOME, "mano_right_np.npz")) -> None:
         import torch
         self.torch = torch
-        self.pipe, self.dtype = load_model(dtype_name, models)
-        self.model = GraphedModel(self.pipe.wilor_model, self.dtype)
+        self.pipe, self.dtype, self.device = load_model(dtype_name, models)
+        self.model = GraphedModel(self.pipe.wilor_model, self.dtype, self.device)
         if not os.path.exists(mano_out):
             export_mano(self.pipe.wilor_model, mano_out)
         self.conf = conf
@@ -248,7 +258,7 @@ class HandEstimator:
             self.since_detect += 1
             return [(b, r, -1.0) for b, r in self.track], "track"
         self.since_detect = 0
-        det = self.pipe.hand_detector(rgb, conf=self.conf, verbose=False, half=True)[0]
+        det = self.pipe.hand_detector(rgb, conf=self.conf, verbose=False, half=self.device.type == "cuda")[0]
         boxes = det.boxes.data.cpu().numpy()
         boxes = boxes[boxes[:, 5] == 1]   # right hands only (class 1), for now
         boxes = boxes[np.argsort(-boxes[:, 4])][:MAX_HANDS]
@@ -278,7 +288,7 @@ class HandEstimator:
                                                       right == 0, 1.0, 0, border_mode=cv2.BORDER_CONSTANT)
             patches.append(patch)
             meta.append((center, size, right, conf, box))
-        x = torch.from_numpy(np.stack(patches)).to(device="cuda", dtype=self.dtype)
+        x = torch.from_numpy(np.stack(patches)).to(device=self.device, dtype=self.dtype)
         out = self.model(x)
         f = 5000.0 / PATCH * img_size.max()
         res, track = [], []
@@ -336,6 +346,10 @@ def main() -> None:
                     help="where to export MANO as plain arrays for the studio's numpy model")
     ap.add_argument("--bench", type=float, default=0, help="no server: run N seconds and print timings")
     args = ap.parse_args()
+    # ultralytics touches a relative "runs/" path on every predict; relative to the
+    # studio folder on Google Drive that raises WinError 433, so work from the local home
+    os.makedirs(HOME, exist_ok=True)
+    os.chdir(HOME)
 
     srv = None
     if not args.bench:
@@ -360,7 +374,8 @@ def main() -> None:
     log(f"model loaded in {load_s:.1f}s")
     if srv:
         send(conn, {"type": "hello", "proto": PROTO, "faces": est.faces(), "load_s": round(load_s, 1),
-                    "camera": args.camera, "device": est.torch.cuda.get_device_name(0)})
+                    "camera": args.camera,
+                    "device": est.torch.cuda.get_device_name(0) if est.device.type == "cuda" else "CPU (GPU 없음, 느림)"})
 
     seq, n, t_start = 0, 0, time.time()
     acc = {"detect": 0.0, "wilor": 0.0, "jpeg": 0.0}
