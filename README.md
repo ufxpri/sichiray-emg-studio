@@ -50,6 +50,8 @@ uv pip install --python venv/Scripts/python.exe --no-deps "git+https://github.co
 ```
 
 > **참고:** 손 인식 모델 가중치(약 2.5 GB)는 첫 실행 때 자동으로 내려받습니다. 다른 위치의 Python을 쓰려면 환경 변수 `EMG_HAND_PY`로 지정합니다.
+>
+> **NVIDIA GPU가 없는 PC**에서는 첫 줄의 torch 설치만 `--index-url https://download.pytorch.org/whl/cpu`로 바꾸세요. 워커가 자동으로 CPU(fp32, CUDA 그래프 없음)로 돌아가며, 손 인식이 초당 몇 프레임 수준으로 느려집니다.
 
 ## 사용 방법 (Usage)
 

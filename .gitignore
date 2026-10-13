@@ -5,3 +5,5 @@ docs/
 __pycache__/
 *.pyc
 .pytest_cache/
+# Google Drive folder metadata
+desktop.ini
