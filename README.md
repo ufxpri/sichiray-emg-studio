@@ -55,7 +55,7 @@ uv pip install --python venv/Scripts/python.exe --no-deps "git+https://github.co
 
 ## 사용 방법 (Usage)
 
-스튜디오를 실행하면 런처가 열리고, 연결할 포트를 고를 수 있습니다.
+스튜디오를 실행하면 먼저 착용 가이드가 나오고, [착용 완료]를 누르면 런처가 열려 연결할 포트를 고를 수 있습니다. 가이드를 건너뛰려면 `--no-guide`를 붙입니다.
 
 ```bash
 python emg_studio.py

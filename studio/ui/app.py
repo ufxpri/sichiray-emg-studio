@@ -8,12 +8,13 @@ import sys
 from . import theme  # noqa: F401  (sets the Qt binding for pyqtgraph before it is imported)
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (QApplication, QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-                               QMainWindow, QPushButton, QVBoxLayout, QWidget)
+                               QMainWindow, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
 from ..core.hub import Hub
 from ..device.protocol import LinkState
 from ..device.sources import find_ch340, list_ports
 from .common import STATE_LABEL
+from .guide import WearGuide
 from .win_camera import CameraWindow
 from .win_filter import FilterWindow
 from .win_hand3d import Hand3DWindow
@@ -34,7 +35,10 @@ ACTIVE = (LinkState.CONNECTED, LinkState.CONNECTING)
 
 
 class Launcher(QMainWindow):
-    def __init__(self, hub: Hub) -> None:
+    GUIDE_SIZE = (980, 680)
+    MAIN_SIZE = (620, 470)
+
+    def __init__(self, hub: Hub, guide: bool = True) -> None:
         super().__init__()
         self.hub = hub
         self.wins: dict[str, QMainWindow] = {}
@@ -75,6 +79,9 @@ class Launcher(QMainWindow):
         allb = QPushButton("모두 열기")
         allb.clicked.connect(lambda: [self.open(k) for k in WINDOWS])
         grid.addWidget(allb, len(WINDOWS), 0, 1, 2)
+        guide_btn = QPushButton("착용 가이드 다시 보기")
+        guide_btn.clicked.connect(self.show_guide)
+        grid.addWidget(guide_btn, len(WINDOWS) + 1, 0, 1, 2)
 
         root = QWidget()
         v = QVBoxLayout(root)
@@ -82,12 +89,31 @@ class Launcher(QMainWindow):
         v.addWidget(self.state)
         v.addWidget(wg)
         v.addStretch(1)
-        self.setCentralWidget(root)
-        self.resize(620, 470)
+        self.guide = WearGuide()
+        self.guide.done.connect(self.show_main)
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self.guide)
+        self.pages.addWidget(root)
+        self.main_page = root
+        self.setCentralWidget(self.pages)
+        if guide:
+            self.show_guide()
+        else:
+            self.show_main()
         self._ports()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._status)
         self._timer.start(250)
+
+    def show_guide(self) -> None:
+        self.pages.setCurrentWidget(self.guide)
+        self.setWindowTitle("착용 가이드 — EMG Studio")
+        self.resize(*self.GUIDE_SIZE)
+
+    def show_main(self) -> None:
+        self.pages.setCurrentWidget(self.main_page)
+        self.setWindowTitle("EMG Studio")
+        self.resize(*self.MAIN_SIZE)
 
     def _ports(self) -> None:
         self.port.clear()
@@ -154,13 +180,14 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--open", default="", help="windows to open: " + ",".join(WINDOWS) + " or all")
     ap.add_argument("--snapshot", help="save each window as PNG into this folder, then quit")
     ap.add_argument("--after", type=float, default=10.0, help="seconds before --snapshot")
+    ap.add_argument("--no-guide", action="store_true", help="skip the wearing guide at start")
     ap.add_argument("--toggle-at", type=float, help="demo: press the mode button after this many seconds")
     args = ap.parse_args(argv)
 
     app = QApplication(sys.argv[:1])
     theme.apply(app)
     hub = Hub()
-    win = Launcher(hub)
+    win = Launcher(hub, guide=not args.no_guide)
     win.show()
     if args.demo:
         win.connect_to(f"demo:{args.demo}")
