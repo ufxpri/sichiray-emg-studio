@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import Callable
 
 import numpy as np
 
@@ -42,6 +43,8 @@ class Link:
         self._thread: threading.Thread | None = None
         self._hex, self._ascii = HexParser(), AsciiParser()
         self._vote = ("", 0)
+        # recorder tap: (bytes, perf_counter at arrival, mode, HEX frames, their sample times)
+        self.tap: Callable[[bytes, float, str | None, list, list], None] | None = None
 
     # ------------------------------------------------------------ lifecycle
     def open(self, source: ByteSource) -> None:
@@ -131,6 +134,7 @@ class Link:
         self.bytes.add(data)
         frames, dropped = self._hex.feed(data)
         rows, bad = self._ascii.feed(data)
+        stamps = []
         with self.lock:
             st = self._stats
             st.record_rx(len(data), now)
@@ -140,14 +144,19 @@ class Link:
                 st.record_resync(dropped)
                 for f in frames:
                     st.record_frame(f.ts, f.imu, f.battery, now)
+                    t = self._clock.stamp(f.ts, pc)
+                    stamps.append(t)
                     self.emg.write(f.emg)
-                    self.tsamp.write(self._clock.stamp(f.ts, pc))
+                    self.tsamp.write(t)
                     self.imu.write(f.imu)
             elif self.mode == "ascii":
                 st.record_lines(len(rows), bad, now)
                 if rows:                           # no device clock in ASCII: arrival time
                     self.emg.write(rows)
                     self.tsamp.write(np.full(len(rows), pc))
+            mode, tap = self.mode, self.tap
+        if tap is not None:
+            tap(data, pc, mode, frames if mode == "hex" else [], stamps)
 
     # ------------------------------------------------------------ reading
     def read_since(self, gen: int, pos: int) -> tuple[int, np.ndarray, np.ndarray, int]:

@@ -8,6 +8,7 @@ samples are put on.
 
 Wire format (owned by the worker, versioned by config.HAND_PROTO): u32 header len,
 u32 jpeg len, u32 blob len, header JSON, JPEG, float32 vertices (778x3 per hand).
+Commands back to the worker (video recording) are u32 len + JSON.
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 
@@ -78,6 +80,9 @@ class CameraLink:
         self._rx: list[float] = []
         self.faces: np.ndarray | None = None
         self.device = ""
+        self.on_frame: Callable[[HandFrame], None] | None = None   # recorder tap, called on the receive thread
+        self._record_done: dict | None = None
+        self._send_lock = threading.Lock()
 
     # ------------------------------------------------------------ lifecycle
     @staticmethod
@@ -157,6 +162,33 @@ class CameraLink:
                 time.sleep(0.3)
         return None
 
+    def command(self, cmd: dict) -> bool:
+        """Send a command to the worker. -> False if it is not connected."""
+        with self._lock:
+            s = self._sock
+        if s is None:
+            return False
+        body = json.dumps(cmd).encode()
+        try:
+            with self._send_lock:
+                s.sendall(struct.pack("<I", len(body)) + body)
+            return True
+        except OSError:
+            return False
+
+    def start_video(self, folder: str) -> bool:
+        with self._lock:
+            self._record_done = None
+        return self.command({"type": "record", "path": os.path.abspath(folder)})
+
+    def stop_video(self) -> bool:
+        return self.command({"type": "record_stop"})
+
+    def video_result(self) -> dict | None:
+        """The worker's answer to stop_video, once it has arrived."""
+        with self._lock:
+            return self._record_done
+
     @staticmethod
     def _recv(s: socket.socket, n: int) -> bytes:
         buf = bytearray()
@@ -204,6 +236,9 @@ class CameraLink:
             self.faces = np.array(head["faces"], np.int32)
             self.device = head.get("device", "")
             self._set(stop, f"실행 중 · {self.device} · 모델 로딩 {head.get('load_s')}s")
+        elif kind == "record_done":
+            with self._lock:
+                self._record_done = head
         elif kind == "frame":
             verts = np.frombuffer(blob, np.float32).reshape(-1, N_VERTS, 3) if blob else np.zeros((0, N_VERTS, 3))
             hands = tuple(HandObs.decode(h, verts[i]) for i, h in enumerate(head["hands"]))
@@ -212,9 +247,12 @@ class CameraLink:
                 if stop is not self._stop:
                     return
                 self._seq += 1
-                self._frame = HandFrame(self._seq, head["t_ns"] / 1e9, head["w"], head["h"], hands, head["how"],
-                                        head["cam_fps"], head["ms"], head["lag_ms"], jpeg)
+                frame = self._frame = HandFrame(self._seq, head["t_ns"] / 1e9, head["w"], head["h"], hands,
+                                                head["how"], head["cam_fps"], head["ms"], head["lag_ms"], jpeg)
                 self._rx = [t for t in self._rx if now - t < 1.0] + [now]
+                tap = self.on_frame
+            if tap is not None:
+                tap(frame)
 
     @staticmethod
     def _log_tail() -> str:

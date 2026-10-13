@@ -17,6 +17,7 @@ from ..device.protocol import ModeSpec, spec_for
 from ..device.stats import LinkSnapshot
 from ..hand.camera_link import CameraLink
 from ..pose.learner import PoseLearner
+from ..record.session import SessionRecorder
 from .calibration import Calibrator
 from .pipeline import Pipeline
 from .settings import Calibration, FilterSpec, Settings
@@ -42,6 +43,7 @@ class Hub(QObject):
         self._gen = -1
         self._pos = 0
         self.pose = PoseLearner(emg=self, frames=self.camera)
+        self.recorder = SessionRecorder(self.link, self.camera)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.tick)
         self._timer.start(1000 // config.TICK_HZ)

@@ -20,6 +20,6 @@ HAND_LOG = os.path.join(HAND_HOME, "worker.log")
 HAND_PORT = int(os.environ.get("EMG_HAND_PORT", "8790"))
 MANO_NPZ = os.path.join(HAND_HOME, "mano_right_np.npz")
 WORKER = os.path.join(ROOT, "worker", "hand_worker.py")
-HAND_PROTO = 1          # wire-format version shared with worker/hand_worker.py
+HAND_PROTO = 2          # wire-format version shared with worker/hand_worker.py
 
 TICK_HZ = 30            # hub clock

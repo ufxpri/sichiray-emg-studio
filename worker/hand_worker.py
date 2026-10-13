@@ -21,12 +21,17 @@ Must stay standalone: it runs in another interpreter and cannot import studio.
 Output: TCP, one client. Each message = u32 header length, u32 jpeg length,
 u32 blob length, header JSON, JPEG bytes, blob. The blob is float32 MANO vertices,
 778x3 per hand in header order. The first message is {"type": "hello", "faces": ...}.
+Input: the studio may send u32 length + JSON commands on the same socket:
+  {"type": "record", "path": "<dir>"}  write every captured frame to <dir>/video.avi
+                                         (MJPG) and its perf_counter_ns to video_frames.npz
+  {"type": "record_stop"}              finish; answered with {"type": "record_done", ...}
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import queue
 import socket
 import struct
 import sys
@@ -39,7 +44,7 @@ import cv2
 import numpy as np
 
 warnings.filterwarnings("ignore")
-PROTO = 1   # wire-format version; the studio checks it (studio/config.py HAND_PROTO)
+PROTO = 2   # wire-format version; the studio checks it (studio/config.py HAND_PROTO)
 HOME = os.path.join(os.path.expanduser("~"), ".emg_hand")
 MODELS = os.path.join(HOME, "models")          # replaced by --models
 PATCH = 256
@@ -51,6 +56,56 @@ def log(*a) -> None:
 
 
 # --------------------------------------------------------------------- camera
+class VideoRecorder:
+    """Every captured frame, not only the ones inference keeps up with. Encoding runs in
+    its own thread; if it falls behind, frames are dropped and counted, never blocking capture."""
+
+    def __init__(self, folder: str, fps: float) -> None:
+        self.folder = folder
+        self.fps = fps
+        self.q: queue.Queue = queue.Queue(maxsize=240)
+        self.t_ns: list[int] = []
+        self.cam_seq: list[int] = []
+        self.dropped = 0
+        self.error = ""
+        self.writer = None
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def push(self, frame, t_ns: int, seq: int) -> None:
+        try:
+            self.q.put_nowait((frame, t_ns, seq))
+        except queue.Full:
+            self.dropped += 1
+
+    def _run(self) -> None:
+        while True:
+            item = self.q.get()
+            if item is None:
+                break
+            frame, t_ns, seq = item
+            if self.writer is None:
+                h, w = frame.shape[:2]
+                path = os.path.join(self.folder, "video.avi")
+                self.writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), self.fps, (w, h))
+                if not self.writer.isOpened():
+                    self.error = f"cannot write {path}"
+            if not self.error:
+                self.writer.write(frame)
+                self.t_ns.append(t_ns)
+                self.cam_seq.append(seq)
+
+    def finish(self) -> dict:
+        self.q.put(None)
+        self.thread.join()
+        if self.writer is not None:
+            self.writer.release()
+        np.savez(os.path.join(self.folder, "video_frames.npz"),
+                 t_ns=np.array(self.t_ns, np.int64), cam_seq=np.array(self.cam_seq, np.int64))
+        return {"type": "record_done", "frames": len(self.t_ns), "dropped": self.dropped,
+                "error": self.error, "fps_nominal": self.fps}
+
+
 class Camera:
     """Keeps only the newest frame. Reading blocks at the camera rate, so it
     lives in its own thread and the inference loop never waits for exposure."""
@@ -70,6 +125,7 @@ class Camera:
         self.seq = 0
         self.fps = 0.0
         self.stop = False
+        self.recorder: VideoRecorder | None = None
         threading.Thread(target=self._run, daemon=True).start()
 
     def _run(self) -> None:
@@ -88,6 +144,9 @@ class Camera:
                 frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
             with self.lock:
                 self.frame, self.t_ns, self.seq = frame, t, self.seq + 1
+                rec, seq = self.recorder, self.seq
+            if rec is not None:
+                rec.push(frame, t, seq)
             now = time.perf_counter()
             self.fps = 0.9 * self.fps + 0.1 / max(now - last, 1e-3)
             last = now
@@ -329,6 +388,43 @@ def send(conn: socket.socket, header: dict, jpeg: bytes = b"") -> None:
     conn.sendall(struct.pack("<III", len(h), len(jpeg), len(blob)) + h + jpeg + blob)
 
 
+def serve_commands(conn: socket.socket, cam: "Camera", send_lock: threading.Lock) -> None:
+    """Reads studio commands until the socket closes."""
+    def recv(n: int) -> bytes:
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = conn.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError
+            buf += chunk
+        return bytes(buf)
+
+    try:
+        while True:
+            (n,) = struct.unpack("<I", recv(4))
+            cmd = json.loads(recv(n))
+            if cmd.get("type") == "record":
+                os.makedirs(cmd["path"], exist_ok=True)
+                rec = VideoRecorder(cmd["path"], cam.cap.get(cv2.CAP_PROP_FPS) or 30.0)
+                with cam.lock:
+                    cam.recorder = rec
+                log("recording to", cmd["path"])
+            elif cmd.get("type") == "record_stop":
+                with cam.lock:
+                    rec, cam.recorder = cam.recorder, None
+                done = rec.finish() if rec else {"type": "record_done", "frames": 0, "dropped": 0,
+                                                  "error": "not recording"}
+                log("recording done:", done)
+                with send_lock:
+                    send(conn, done)
+    except (OSError, ConnectionError, ValueError):
+        pass
+    with cam.lock:
+        rec, cam.recorder = cam.recorder, None
+    if rec:
+        rec.finish()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--camera", type=int, default=0)
@@ -372,7 +468,9 @@ def main() -> None:
             send(conn, {"type": "error", "text": str(e)})
         sys.exit(1)
     log(f"model loaded in {load_s:.1f}s")
+    send_lock = threading.Lock()
     if srv:
+        threading.Thread(target=serve_commands, args=(conn, cam, send_lock), daemon=True).start()
         send(conn, {"type": "hello", "proto": PROTO, "faces": est.faces(), "load_s": round(load_s, 1),
                     "camera": args.camera,
                     "device": est.torch.cuda.get_device_name(0) if est.device.type == "cuda" else "CPU (GPU 없음, 느림)"})
@@ -402,11 +500,12 @@ def main() -> None:
         n += 1
         if srv:
             try:
-                send(conn, {"type": "frame", "seq": seq, "t_ns": t_ns, "w": frame.shape[1], "h": frame.shape[0],
-                            "hands": res, "how": how, "cam_fps": round(cam.fps, 1),
-                            "ms": {"detect": round((t2 - t1) * 1000, 1), "wilor": round((t3 - t2) * 1000, 1),
-                                   "total": round((t4 - t1) * 1000, 1)},
-                            "lag_ms": round((time.perf_counter_ns() - t_ns) / 1e6, 1)}, jpeg)
+                with send_lock:
+                    send(conn, {"type": "frame", "seq": seq, "t_ns": t_ns, "w": frame.shape[1], "h": frame.shape[0],
+                                "hands": res, "how": how, "cam_fps": round(cam.fps, 1),
+                                "ms": {"detect": round((t2 - t1) * 1000, 1), "wilor": round((t3 - t2) * 1000, 1),
+                                       "total": round((t4 - t1) * 1000, 1)},
+                                "lag_ms": round((time.perf_counter_ns() - t_ns) / 1e6, 1)}, jpeg)
             except OSError:
                 log("client gone")
                 break
