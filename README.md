@@ -103,6 +103,12 @@ python -m pytest tests
 
 라벨: 0 휴식, 1 가위, 2 주먹, 3 보, 4~8 숫자 1~5, 9 손목 젖히기. 자세한 형식은 세션 폴더의 `README.md`에 있습니다.
 
+### 세션 보기
+
+`viewer/session_viewer.html`을 브라우저(Chrome·Edge)로 열고 **[세션 폴더 열기]**로 세션 폴더나 `data/sessions` 폴더 전체를
+고르면 됩니다. 창에 끌어다 놓아도 됩니다. 설치나 변환 없이 영상 프레임과 오른손 관절, EMG 8채널, 동작 안내를 한 시간축에 맞춰
+보여 주고, EMG 끊김·기기 시계 리셋·영상 fps·손 인식률·안내 지연 같은 점검 항목도 요약합니다. 파일은 브라우저 안에서만 읽습니다.
+
 ## 하드웨어 참고 사항 (Hardware Specs & Known Issues)
 
 <img src="assets/armband_channels.jpg" alt="채널 번호 라벨을 붙인 8채널 밴드. 5번 셀에 USB-C 포트와 녹색 LED가 있다" width="480">
@@ -129,6 +135,7 @@ sichiray-emg-studio/
 │   ├── pose/              # 특징 추출, 데이터셋 수집, 학습(Ridge/MLP)과 평가
 │   ├── record/            # 손동작 녹화: 랜덤 세션 진행, 세션 폴더 저장
 │   └── ui/                # PySide6 UI 컴포넌트와 OpenGL 뷰어
+├── viewer/                # 녹화 세션 뷰어 (HTML 한 파일)
 ├── tests/                 # 회귀 테스트
 ├── assets/                # 문서용 이미지
 └── data/                  # 런타임 설정, 수집 데이터, 학습 모델 (gitignore)

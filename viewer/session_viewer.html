@@ -1,0 +1,1193 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>EMG 세션 뷰어</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500;700&display=swap">
+<style>
+/* Layout: one shared clock. Camera + current prompt on the left, the 8-lane EMG scope on the right,
+   the whole session as a strip underneath; dark-first like EMG Studio, light on request. */
+:root {
+  --bg: #121419; --panel: #1b1e25; --raised: #23272f; --line: #2e333d;
+  --fg: #dadde3; --muted: #8b919c; --accent: #ffa94d; --on-accent: #1e1404;
+  --cursor: #f1f3f5; --bad: #ff6b6b; --warn: #fcc419; --ok: #69db7c;
+  --ch1: #ff6b6b; --ch2: #ffa94d; --ch3: #ffd43b; --ch4: #8ce99a; --ch5: #3bc9db; --ch6: #74c0fc; --ch7: #b197fc; --ch8: #f783ac;
+  --g1: #ff922b; --g2: #fa5252; --g3: #51cf66; --g4: #4dabf7; --g5: #748ffc; --g6: #9775fa; --g7: #cc5de8; --g8: #f06595; --g9: #fcc419;
+  --f-ui: "IBM Plex Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", system-ui, sans-serif;
+  --f-data: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+  --r: 6px;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f3f4f7; --panel: #ffffff; --raised: #eceef2; --line: #d9dde4;
+    --fg: #1c2027; --muted: #5d6571; --accent: #d9480f; --on-accent: #ffffff;
+    --cursor: #111317; --bad: #c92a2a; --warn: #b07b00; --ok: #2b8a3e;
+    --ch1: #e03131; --ch2: #e8590c; --ch3: #b08800; --ch4: #2f9e44; --ch5: #0c8599; --ch6: #1971c2; --ch7: #7048e8; --ch8: #c2255c;
+    --g1: #e8590c; --g2: #e03131; --g3: #2f9e44; --g4: #1c7ed6; --g5: #4263eb; --g6: #7048e8; --g7: #ae3ec9; --g8: #d6336c; --g9: #c99700;
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #f3f4f7; --panel: #ffffff; --raised: #eceef2; --line: #d9dde4;
+  --fg: #1c2027; --muted: #5d6571; --accent: #d9480f; --on-accent: #ffffff;
+  --cursor: #111317; --bad: #c92a2a; --warn: #b07b00; --ok: #2b8a3e;
+  --ch1: #e03131; --ch2: #e8590c; --ch3: #b08800; --ch4: #2f9e44; --ch5: #0c8599; --ch6: #1971c2; --ch7: #7048e8; --ch8: #c2255c;
+  --g1: #e8590c; --g2: #e03131; --g3: #2f9e44; --g4: #1c7ed6; --g5: #4263eb; --g6: #7048e8; --g7: #ae3ec9; --g8: #d6336c; --g9: #c99700;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+html, body { min-height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 var(--f-ui); }
+.app { max-width: 1680px; margin: 0 auto; padding-inline: 16px; padding-block: 14px 28px; display: flex; flex-direction: column; gap: 12px; }
+
+.top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; }
+.brand { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; min-width: 0; }
+h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.01em; text-wrap: balance; }
+.sess { color: var(--muted); font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
+.sess b { color: var(--fg); font-weight: 500; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+button, .btn, select {
+  font: inherit; font-size: 13px; color: var(--fg); background: var(--raised);
+  border: 1px solid var(--line); border-radius: var(--r); padding: 6px 12px; cursor: pointer; line-height: 1.3;
+}
+select { padding-right: 8px; max-width: 100%; }
+button:hover, .btn:hover, select:hover { border-color: var(--muted); }
+button:focus-visible, .btn:focus-within, select:focus-visible, canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn.primary, button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 500; }
+button:disabled { opacity: .45; cursor: default; }
+
+.notice { margin: 0; padding: 8px 12px; border: 1px dashed var(--line); border-radius: var(--r); color: var(--muted); font-size: 13px; }
+.notice b { color: var(--accent); font-weight: 500; }
+.status { margin: 0; font-size: 13px; color: var(--muted); min-height: 1.5em; }
+.status.err { color: var(--bad); }
+
+.stage { display: grid; grid-template-columns: minmax(280px, 34%) minmax(0, 1fr); gap: 12px; align-items: start; }
+.left { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); }
+.video { position: relative; aspect-ratio: 4 / 3; max-width: 100%; overflow: hidden; }
+.video canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.vtag { position: absolute; left: 8px; bottom: 8px; font: 12px/1.4 var(--f-data); color: var(--muted); background: var(--panel); padding: 2px 6px; border-radius: 4px; }
+
+.prompt { padding: 14px 16px; display: grid; gap: 6px; }
+.prompt .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chip { font-size: 12px; font-weight: 500; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+.chip.hold { color: var(--on-accent); background: var(--gc, var(--accent)); border-color: transparent; }
+.chip.ready { color: var(--gc, var(--accent)); border-color: var(--gc, var(--accent)); }
+.gname { font-size: 34px; font-weight: 700; line-height: 1.15; letter-spacing: -0.02em; }
+.gname small { font: 500 13px var(--f-data); color: var(--muted); margin-left: 6px; letter-spacing: 0; }
+.how { color: var(--muted); font-size: 13px; min-height: 1.5em; }
+.bar { height: 4px; background: var(--raised); border-radius: 2px; overflow: hidden; }
+.bar i { display: block; height: 100%; width: 0; background: var(--gc, var(--muted)); }
+.kv { display: flex; flex-wrap: wrap; gap: 2px 14px; font: 12px/1.6 var(--f-data); color: var(--muted); font-variant-numeric: tabular-nums; }
+.kv b { color: var(--fg); font-weight: 500; }
+
+.scope { position: relative; height: 470px; min-width: 0; }
+.scope canvas, .ov canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.scope canvas { cursor: grab; }
+.scope canvas.drag { cursor: grabbing; }
+
+.transport { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 8px 10px; }
+.clock { font: 500 18px var(--f-data); font-variant-numeric: tabular-nums; min-width: 9.5ch; }
+.clock small { display: block; font-size: 11px; color: var(--muted); font-weight: 400; }
+.sep { width: 1px; align-self: stretch; background: var(--line); }
+.field { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+#play { min-width: 74px; }
+
+.ov { height: 150px; padding: 0; overflow: hidden; }
+.ov canvas { cursor: pointer; }
+
+.info { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+.info .panel { padding: 14px 16px; min-width: 0; }
+h2 { margin: 0 0 10px; font-size: 12px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.checks { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.check { font-size: 12px; padding: 3px 9px; border-radius: var(--r); border: 1px solid var(--line); display: inline-flex; gap: 6px; align-items: center; }
+.check::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--c); flex: none; }
+.check.ok { --c: var(--ok); } .check.warn { --c: var(--warn); } .check.bad { --c: var(--bad); }
+dl { margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; font-size: 13px; }
+dt { color: var(--muted); }
+dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+dd code, .mono { font-family: var(--f-data); font-size: 12px; }
+.chbars { display: grid; gap: 6px; }
+.chbar { display: grid; grid-template-columns: 34px minmax(0, 1fr) 7ch; gap: 8px; align-items: center; font: 12px var(--f-data); font-variant-numeric: tabular-nums; }
+.chbar .track { position: relative; height: 14px; background: var(--raised); border-radius: 3px; overflow: hidden; }
+.chbar .track i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; }
+.chbar .track i.all { opacity: .35; }
+.chbar span:last-child { text-align: right; color: var(--muted); }
+.legend { margin-top: 10px; font-size: 12px; color: var(--muted); }
+.glegend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 12px; font-size: 12px; color: var(--muted); }
+.glegend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px; background: var(--c); margin-right: 5px; vertical-align: -1px; }
+
+.keys { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 16px; }
+kbd { font: 11px var(--f-data); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; color: var(--fg); background: var(--raised); }
+
+.drop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; background: var(--bg); opacity: .94; border: 3px dashed var(--accent); font-size: 20px; font-weight: 500; color: var(--accent); }
+
+@media (max-width: 960px) {
+  .stage, .info { grid-template-columns: minmax(0, 1fr); }
+  .scope { height: 380px; }
+  .gname { font-size: 28px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <h1>EMG 세션 뷰어</h1>
+      <span class="sess" id="sessTitle"></span>
+    </div>
+    <div class="actions">
+      <select id="sessPick" hidden aria-label="세션 선택"></select>
+      <label class="btn primary" for="folderIn">세션 폴더 열기</label>
+      <input id="folderIn" type="file" webkitdirectory multiple hidden>
+      <label class="btn" for="filesIn">파일 고르기</label>
+      <input id="filesIn" type="file" multiple hidden>
+      <button id="demoBtn" type="button">예시 보기</button>
+    </div>
+  </header>
+
+  <p class="notice" id="notice"><b>예시 데이터</b>를 보여 주고 있습니다. 실제 녹화가 아닌 합성 신호예요.
+    <code class="mono">data/sessions/</code> 아래 세션 폴더(또는 <code class="mono">sessions</code> 폴더 전체)를 열거나 이 창에 끌어다 놓으면 바뀝니다.
+    파일은 이 브라우저 안에서만 읽고 어디에도 보내지 않습니다.</p>
+  <p class="status" id="status" role="status" hidden></p>
+
+  <main class="stage">
+    <section class="left">
+      <div class="panel video" id="videoBox"><canvas id="vidCv" aria-label="카메라 프레임과 손 관절"></canvas><span class="vtag" id="vidTag"></span></div>
+      <div class="panel prompt" id="promptCard" aria-live="off">
+        <div class="row"><span class="chip" id="pPhase">—</span><span class="kv" id="pWhere"></span></div>
+        <div class="gname" id="pName">—</div>
+        <div class="how" id="pHow"></div>
+        <div class="bar"><i id="pBar"></i></div>
+        <div class="kv" id="pMore"></div>
+      </div>
+    </section>
+    <section class="panel scope"><canvas id="emgCv" tabindex="0" aria-label="EMG 8채널 파형. 드래그로 이동, Ctrl+휠로 확대"></canvas></section>
+  </main>
+
+  <div class="panel transport">
+    <button id="prevTrial" type="button" title="이전 시행 ( [ )">◀◀ 이전</button>
+    <button id="play" type="button" class="primary" title="재생/정지 (Space)">▶ 재생</button>
+    <button id="nextTrial" type="button" title="다음 시행 ( ] )">다음 ▶▶</button>
+    <div class="clock" id="clock">0:00.000<small>perf —</small></div>
+    <span class="sep"></span>
+    <label class="field" for="gestPick">동작
+      <select id="gestPick"><option value="-1">전체</option></select></label>
+    <label class="field" for="speedPick">속도
+      <select id="speedPick">
+        <option value="0.1">0.1×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option><option value="10">10×</option>
+      </select></label>
+    <label class="field" for="winPick">창
+      <select id="winPick">
+        <option value="1">1 s</option><option value="2">2 s</option><option value="5">5 s</option>
+        <option value="10" selected>10 s</option><option value="30">30 s</option><option value="60">60 s</option>
+      </select></label>
+    <label class="field" for="gainPick">진폭
+      <select id="gainPick">
+        <option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option>
+      </select></label>
+    <label class="field" for="timeBase">시각
+      <select id="timeBase"><option value="shown" selected>화면에 뜬 시각</option><option value="plan">예정 시각</option></select></label>
+  </div>
+
+  <section class="panel ov"><canvas id="ovCv" aria-label="세션 전체 개요. 누르면 그 시각으로 이동"></canvas></section>
+
+  <section class="info">
+    <div class="panel">
+      <h2>세션 점검</h2>
+      <div class="checks" id="checks"></div>
+      <dl id="metaList"></dl>
+    </div>
+    <div class="panel">
+      <h2>채널별 평균 진폭 |x − 127|</h2>
+      <div class="chbars" id="chBars"></div>
+      <p class="legend">진한 막대는 ‘유지’ 구간 평균, 옅은 막대는 세션 전체 평균. 다른 채널보다 유난히 낮은 채널은 전극 접촉을 확인하세요.</p>
+      <div class="glegend" id="gLegend"></div>
+    </div>
+  </section>
+
+  <footer class="keys">
+    <span><kbd>Space</kbd> 재생/정지</span>
+    <span><kbd>←</kbd><kbd>→</kbd> 영상 한 프레임</span>
+    <span><kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd> 1초</span>
+    <span><kbd>[</kbd><kbd>]</kbd> 이전/다음 시행</span>
+    <span>파형: 드래그로 이동 · <kbd>Ctrl</kbd>+휠로 창 크기</span>
+    <span>시간은 녹화 시작(<code class="mono">t0_perf</code>) 기준</span>
+  </footer>
+</div>
+<div class="drop" id="drop" hidden>여기에 세션 폴더를 놓으세요</div>
+
+<script id="core">
+// ---------- file formats: .npz (zip of .npy) and MJPG .avi, read lazily with Blob.slice
+const u32 = (u, p) => (u[p] | u[p + 1] << 8 | u[p + 2] << 16 | u[p + 3] << 24) >>> 0;
+const u16 = (u, p) => u[p] | u[p + 1] << 8;
+const fourcc = (u, p) => String.fromCharCode(u[p], u[p + 1], u[p + 2], u[p + 3]);
+const big = (dv, p) => Number(dv.getBigUint64(p, true));
+async function bytes(blob) { return new Uint8Array(await blob.arrayBuffer()); }
+
+async function npzOpen(file) {
+  const tailLen = Math.min(file.size, 65557 + 20);
+  const tail = await bytes(file.slice(file.size - tailLen));
+  let e = -1;
+  for (let i = tail.length - 22; i >= 0; i--) if (u32(tail, i) === 0x06054b50) { e = i; break; }
+  if (e < 0) throw new Error(file.name + ": zip 형식이 아닙니다");
+  let n = u16(tail, e + 10), cdSize = u32(tail, e + 12), cdOff = u32(tail, e + 16);
+  if ((n === 0xffff || cdOff === 0xffffffff || cdSize === 0xffffffff) && e >= 20 && u32(tail, e - 20) === 0x07064b50) {
+    const tdv = new DataView(tail.buffer);
+    const at = big(tdv, e - 20 + 8);
+    const z = await bytes(file.slice(at, at + 56)), zdv = new DataView(z.buffer);
+    n = big(zdv, 32); cdSize = big(zdv, 40); cdOff = big(zdv, 48);
+  }
+  const cd = await bytes(file.slice(cdOff, cdOff + cdSize)), cdv = new DataView(cd.buffer);
+  const entries = {};
+  let p = 0;
+  for (let k = 0; k < n && p + 46 <= cd.length; k++) {
+    if (u32(cd, p) !== 0x02014b50) break;
+    const method = u16(cd, p + 10);
+    let csize = u32(cd, p + 20), usize = u32(cd, p + 24), lho = u32(cd, p + 42);
+    const nl = u16(cd, p + 28), xl = u16(cd, p + 30), cl = u16(cd, p + 32);
+    const name = new TextDecoder().decode(cd.subarray(p + 46, p + 46 + nl));
+    for (let x = p + 46 + nl, xe = x + xl; x + 4 <= xe;) {
+      const id = u16(cd, x), sz = u16(cd, x + 2);
+      if (id === 1) {
+        let q = x + 4;
+        if (usize === 0xffffffff) { usize = big(cdv, q); q += 8; }
+        if (csize === 0xffffffff) { csize = big(cdv, q); q += 8; }
+        if (lho === 0xffffffff) { lho = big(cdv, q); q += 8; }
+      }
+      x += 4 + sz;
+    }
+    entries[name.replace(/\.npy$/, "")] = { method, csize, usize, lho };
+    p += 46 + nl + xl + cl;
+  }
+  return {
+    names: Object.keys(entries),
+    has: k => k in entries,
+    async get(key) {
+      const ent = entries[key];
+      if (!ent) throw new Error(file.name + ": '" + key + "' 배열이 없습니다");
+      const lh = await bytes(file.slice(ent.lho, ent.lho + 30));
+      const start = ent.lho + 30 + u16(lh, 26) + u16(lh, 28);
+      let raw = file.slice(start, start + ent.csize);
+      if (ent.method === 8) raw = await new Response(raw.stream().pipeThrough(new DecompressionStream("deflate-raw"))).blob();
+      else if (ent.method !== 0) throw new Error(file.name + ": 지원하지 않는 압축 방식 " + ent.method);
+      return parseNpy(await raw.arrayBuffer(), key);
+    },
+  };
+}
+
+function parseNpy(buf, key) {
+  const u = new Uint8Array(buf);
+  if (u[0] !== 0x93 || fourcc(u, 1) !== "NUMP") throw new Error(key + ": .npy 형식이 아닙니다");
+  const major = u[6];
+  const hl = major === 1 ? u16(u, 8) : u32(u, 8), hs = major === 1 ? 10 : 12;
+  const header = new TextDecoder("latin1").decode(u.subarray(hs, hs + hl));
+  const descr = /'descr':\s*'([^']+)'/.exec(header)[1];
+  if (/'fortran_order':\s*True/.test(header)) throw new Error(key + ": Fortran 순서 배열은 지원하지 않습니다");
+  const shape = /'shape':\s*\(([^)]*)\)/.exec(header)[1].split(",").map(s => s.trim()).filter(Boolean).map(Number);
+  if (descr[0] === ">") throw new Error(key + ": big-endian 배열은 지원하지 않습니다");
+  const kind = descr.slice(1), body = buf.slice(hs + hl);
+  const count = shape.reduce((a, b) => a * b, 1);
+  const T = { u1: Uint8Array, b1: Uint8Array, i1: Int8Array, i2: Int16Array, u2: Uint16Array, i4: Int32Array,
+              u4: Uint32Array, f4: Float32Array, f8: Float64Array };
+  let data;
+  if (T[kind]) data = new T[kind](body, 0, count);
+  else if (kind === "i8" || kind === "u8") {
+    const b = kind === "i8" ? new BigInt64Array(body, 0, count) : new BigUint64Array(body, 0, count);
+    data = new Float64Array(count);
+    for (let i = 0; i < count; i++) data[i] = Number(b[i]);
+  } else if (kind[0] === "U") {
+    const w = +kind.slice(1), cp = new Uint32Array(body, 0, count * w);
+    data = new Array(count);
+    for (let i = 0; i < count; i++) {
+      let s = "";
+      for (let j = 0; j < w; j++) { const c = cp[i * w + j]; if (!c) break; s += String.fromCodePoint(c); }
+      data[i] = s;
+    }
+  } else throw new Error(key + ": 지원하지 않는 자료형 " + descr);
+  return { data, shape, descr };
+}
+
+// MJPG AVI: list where each JPEG sits. Uses idx1 when present, else walks the movi lists.
+async function aviIndex(file) {
+  const h = await bytes(file.slice(0, 12));
+  if (fourcc(h, 0) !== "RIFF" || fourcc(h, 8) !== "AVI ") throw new Error(file.name + ": AVI 파일이 아닙니다");
+  const movi = [];
+  let idx1 = null, pos = 12;
+  while (pos + 8 <= file.size) {
+    const hd = await bytes(file.slice(pos, pos + 12));
+    if (hd.length < 8) break;
+    const id = fourcc(hd, 0), sz = u32(hd, 4);
+    if (id === "RIFF") { pos += 12; continue; }                 // OpenDML AVIX extension
+    if (id === "LIST" && hd.length >= 12 && fourcc(hd, 8) === "movi") movi.push([pos + 8, pos + 8 + sz]);
+    else if (id === "idx1") idx1 = [pos + 8, sz];
+    pos += 8 + sz + (sz & 1);
+  }
+  if (!movi.length) throw new Error(file.name + ": 영상 데이터(movi)를 찾지 못했습니다");
+  if (idx1 && movi.length === 1) {
+    const ix = await bytes(file.slice(idx1[0], idx1[0] + idx1[1]));
+    const offs = [], sizes = [];
+    for (let p = 0; p + 16 <= ix.length; p += 16) {
+      const id = fourcc(ix, p);
+      if (id.slice(2) === "dc" || id.slice(2) === "db") { offs.push(u32(ix, p + 8)); sizes.push(u32(ix, p + 12)); }
+    }
+    if (offs.length) {
+      // offsets are relative to the 'movi' fourcc in most writers, absolute in a few
+      let base = movi[0][0];
+      const probe = await bytes(file.slice(base + offs[0], base + offs[0] + 4));
+      if (fourcc(probe, 0).slice(2) !== "dc" && fourcc(probe, 0).slice(2) !== "db") base = 0;
+      const o = new Float64Array(offs.length);
+      for (let i = 0; i < offs.length; i++) o[i] = base + offs[i] + 8;
+      return { offs: o, sizes: Uint32Array.from(sizes), n: offs.length };
+    }
+  }
+  const offs = [], sizes = [], BS = 8 << 20;
+  let bs = 0, buf = new Uint8Array(0);
+  for (const [s, e] of movi) {
+    let p = s + 4;
+    while (p + 8 <= e) {
+      if (p < bs || p + 12 > bs + buf.length) { bs = p; buf = await bytes(file.slice(p, Math.min(file.size, p + BS))); }
+      const q = p - bs;
+      if (q + 8 > buf.length) break;
+      const id = fourcc(buf, q), sz = u32(buf, q + 4);
+      if (id === "LIST") { p += 12; continue; }
+      if ((id.slice(2) === "dc" || id.slice(2) === "db") && sz > 0) { offs.push(p + 8); sizes.push(sz); }
+      p += 8 + sz + (sz & 1);
+    }
+  }
+  return { offs: Float64Array.from(offs), sizes: Uint32Array.from(sizes), n: offs.length };
+}
+</script>
+
+<script>
+// ---------- constants
+const NAMES0 = { 0: "휴식", 1: "가위", 2: "주먹", 3: "보", 4: "1", 5: "2", 6: "3", 7: "4", 8: "5", 9: "손목 젖히기" };
+const KEYS0 = { 0: "rest", 1: "scissors", 2: "rock", 3: "paper", 4: "one", 5: "two", 6: "three", 7: "four", 8: "five", 9: "wrist_ext" };
+const HOW0 = { 1: "검지·중지를 펴고 나머지는 접기", 2: "다섯 손가락 모두 접기", 3: "다섯 손가락 모두 펴기", 4: "검지만 펴기",
+  5: "검지·중지 펴기", 6: "검지·중지·약지 펴기", 7: "엄지만 접고 네 손가락 펴기", 8: "다섯 손가락 모두 펴기",
+  9: "손바닥은 아래, 손등 쪽으로 손목을 끝까지 꺾기" };
+const PHASE_KO = { ready: "준비", hold: "유지", rest: "휴식" };
+const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]];
+const GAP_S = 0.1;                       // EMG samples further apart than this are drawn as a break
+const $ = id => document.getElementById(id);
+
+// ---------- small helpers
+function lb(a, x, lo = 0, hi = a.length) { while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] < x) lo = m + 1; else hi = m; } return lo; }
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+function fmtClock(s) {
+  const sg = s < 0 ? "−" : "", a = Math.abs(s), m = Math.floor(a / 60);
+  return sg + m + ":" + (a - m * 60).toFixed(3).padStart(6, "0");
+}
+function fmtDur(s) { return s >= 90 ? (s / 60).toFixed(1) + "분" : s.toFixed(1) + " s"; }
+function rgba(hex, a) {
+  const h = hex.replace("#", "");
+  const n = parseInt(h.length === 3 ? h.split("").map(c => c + c).join("") : h, 16);
+  return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`;
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]); }
+function median(a) { if (!a.length) return NaN; const s = [...a].sort((x, y) => x - y); return s[s.length >> 1]; }
+
+// ---------- theme tokens for the canvases
+const C = {};
+function readTheme() {
+  const s = getComputedStyle(document.documentElement), v = k => s.getPropertyValue("--" + k).trim();
+  for (const k of ["bg", "panel", "raised", "line", "fg", "muted", "accent", "cursor", "bad", "warn", "ok"]) C[k] = v(k);
+  C.ch = [1, 2, 3, 4, 5, 6, 7, 8].map(i => v("ch" + i));
+  C.g = [C.muted, ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map(i => v("g" + i))];
+  C.font = s.getPropertyValue("--f-data").trim();
+  ovDirty = true; requestDraw();
+}
+const gColor = l => C.g[l] || C.muted;
+
+// ---------- building a session from arrays (shared by files and the example)
+function buildSession(o) {
+  const S = { name: o.name, meta: o.meta || {}, demo: !!o.demo, warnings: o.warnings || [] };
+  const m = S.meta;
+  S.names = Object.assign({}, NAMES0, m.label_names_ko || {});
+  S.how = Object.assign({}, HOW0);
+  for (const g of m.gestures || []) S.how[g.id] = g.how;
+
+  const firsts = [], lasts = [];
+  if (o.emg && o.emg.t.length) {
+    const t = o.emg.t, N = t.length, tm = new Float64Array(N);
+    let mx = -Infinity;
+    for (let i = 0; i < N; i++) { mx = t[i] > mx ? t[i] : mx; tm[i] = mx; }   // aligner re-anchoring steps back a few ms
+    const gaps = [];
+    for (let i = 1; i < N; i++) if (tm[i] - tm[i - 1] > GAP_S) gaps.push([tm[i - 1], tm[i]]);
+    let resets = 0;
+    const f = o.emg.fts;
+    if (f) for (let i = 1; i < f.length; i++) if (f[i] < f[i - 1]) resets++;
+    const hist = new Float64Array(129);
+    const v = o.emg.v;
+    for (let i = 0; i < v.length; i += 3) hist[Math.min(128, Math.abs(v[i] - 127))]++;
+    let acc = 0, p995 = 128;
+    const tot = hist.reduce((a, b) => a + b, 0);
+    for (let k = 0; k <= 128; k++) { acc += hist[k]; if (acc >= tot * 0.995) { p995 = k; break; } }
+    S.emg = { v, t, tm, n: N, gaps, resets, scale: Math.max(6, p995 * 1.1), batt: o.emg.batt };
+    // rate from the sample times between gaps (the device-clock figure in meta breaks when the band reboots)
+    let span = 0, steps = 0;
+    for (let i = 1; i < N; i++) { const dt = tm[i] - tm[i - 1]; if (dt <= GAP_S) { span += dt; steps++; } }
+    S.emg.fs = span > 0 ? steps / span : NaN;
+    firsts.push(tm[0]); lasts.push(tm[N - 1]);
+  }
+
+  if (o.prompts && o.prompts.t.length) {
+    const P = o.prompts, segs = [], trials = new Map(), sets = [];
+    const n = P.t.length;
+    for (let i = 0; i < n; i++) {
+      const k = P.kind[i];
+      if (k === "set_start") sets.push({ a: P.t[i], ap: P.tp[i], set: P.set[i] });
+      if (k !== "ready" && k !== "hold" && k !== "rest") continue;
+      const b = i + 1 < n ? P.t[i + 1] : P.t[i] + 2, bp = i + 1 < n ? P.tp[i + 1] : P.tp[i] + 2;
+      const s = { a: P.t[i], b, ap: P.tp[i], bp, kind: k, label: P.label[i], set: P.set[i], trial: P.trial[i], lag: P.t[i] - P.tp[i] };
+      segs.push(s);
+      const key = s.set * 10000 + s.trial;
+      if (!trials.has(key)) trials.set(key, { set: s.set, trial: s.trial, label: s.label });
+      trials.get(key)[k] = s;
+    }
+    S.segs = segs;
+    S.trials = [...trials.values()].filter(t => t.ready || t.hold).sort((x, y) => (x.ready || x.hold).a - (y.ready || y.hold).a);
+    S.sets = sets;
+    S.perSet = P.order ? P.order.shape[1] : Math.max(...S.trials.map(t => t.trial + 1));
+    S.nSets = m.plan ? m.plan.sets : sets.length;
+    S.events = P;
+    firsts.push(P.t[0]); lasts.push(P.t[n - 1]);
+  }
+
+  if (o.hand && o.hand.t.length) {
+    const H = o.hand.t.length;
+    let with_ = 0;
+    for (let i = 0; i < H; i++) with_ += o.hand.has[i] ? 1 : 0;
+    S.hand = Object.assign({ n: H, withRight: with_ }, o.hand);
+    firsts.push(o.hand.t[0]); lasts.push(o.hand.t[H - 1]);
+  }
+
+  if (o.video && o.video.n) {
+    const V = o.video, n = Math.min(V.n, V.t.length);
+    let missing = 0;
+    if (V.cam) for (let i = 1; i < n; i++) missing += Math.max(0, V.cam[i] - V.cam[i - 1] - 1);
+    S.video = Object.assign({}, V, { n, missing, fps: n > 1 ? (n - 1) / (V.t[n - 1] - V.t[0]) : NaN });
+    firsts.push(V.t[0]); lasts.push(V.t[n - 1]);
+  }
+
+  S.T0 = m.t0_perf != null ? m.t0_perf : Math.min(...firsts);
+  S.Ts = Math.min(S.T0, ...firsts);
+  S.Te = Math.max(...lasts, m.t_end_perf || -Infinity);
+  if (!(S.Te > S.Ts)) S.Te = S.Ts + 1;
+  computeStats(S);
+  return S;
+}
+
+function computeStats(S) {
+  const B = 1600;
+  S.ovB = B;
+  S.heat = new Float32Array(8 * B);
+  S.handFrac = new Float32Array(B).fill(NaN);
+  const span = S.Te - S.Ts;
+  S.chAll = new Float64Array(8); S.chHold = new Float64Array(8);
+  if (S.emg) {
+    const { v, tm, n } = S.emg, cnt = new Float64Array(B);
+    const holds = (S.segs || []).filter(s => s.kind === "hold");
+    let hi = 0, nAll = 0, nHold = 0;
+    for (let i = 0; i < n; i++) {
+      const t = tm[i], b = clamp(Math.floor((t - S.Ts) / span * B), 0, B - 1);
+      cnt[b]++;
+      while (hi < holds.length && holds[hi].b <= t) hi++;
+      const inHold = hi < holds.length && holds[hi].a <= t;
+      const r = i * 8;
+      for (let c = 0; c < 8; c++) {
+        const d = Math.abs(v[r + c] - 127);
+        S.heat[c * B + b] += d; S.chAll[c] += d;
+        if (inHold) S.chHold[c] += d;
+      }
+      nAll++; if (inHold) nHold++;
+    }
+    for (let c = 0; c < 8; c++) {
+      for (let b = 0; b < B; b++) S.heat[c * B + b] = cnt[b] ? S.heat[c * B + b] / cnt[b] : NaN;
+      S.chAll[c] /= Math.max(1, nAll); S.chHold[c] = nHold ? S.chHold[c] / nHold : NaN;
+    }
+    const vals = [];
+    for (const x of S.heat) if (x === x) vals.push(x);
+    vals.sort((a, b) => a - b);
+    S.heatScale = Math.max(1, vals[Math.floor(vals.length * 0.98)] || 1);
+  }
+  if (S.hand) {
+    const cnt = new Float32Array(B), sum = new Float32Array(B);
+    for (let i = 0; i < S.hand.n; i++) {
+      const b = clamp(Math.floor((S.hand.t[i] - S.Ts) / span * B), 0, B - 1);
+      cnt[b]++; sum[b] += S.hand.has[i] ? 1 : 0;
+    }
+    for (let b = 0; b < B; b++) if (cnt[b]) S.handFrac[b] = sum[b] / cnt[b];
+  }
+}
+
+// ---------- reading a session folder
+async function loadFromFiles(name, fm) {
+  setStatus(name + " 읽는 중…");
+  const o = { name, warnings: [] };
+  const step = async (label, fn) => {
+    try { setStatus(name + " · " + label + " 읽는 중…"); await fn(); }
+    catch (e) { console.error(e); o.warnings.push(label + ": " + e.message); }
+  };
+  await step("meta.json", async () => { if (fm["meta.json"]) o.meta = JSON.parse(await fm["meta.json"].text()); });
+  await step("emg.npz", async () => {
+    if (!fm["emg.npz"]) return;
+    const z = await npzOpen(fm["emg.npz"]);
+    o.emg = { v: (await z.get("emg")).data, t: (await z.get("t")).data };
+    if (z.has("frame_ts_ms")) o.emg.fts = (await z.get("frame_ts_ms")).data;
+    if (z.has("battery")) o.emg.batt = (await z.get("battery")).data;
+  });
+  await step("prompts.npz", async () => {
+    if (!fm["prompts.npz"]) return;
+    const z = await npzOpen(fm["prompts.npz"]);
+    const g = async k => (await z.get(k)).data;
+    o.prompts = { t: await g("t"), tp: await g("t_plan"), kind: await g("kind"), set: await g("set"),
+                  trial: await g("trial"), label: await g("label"), order: z.has("order") ? await z.get("order") : null };
+  });
+  await step("hand.npz", async () => {
+    if (!fm["hand.npz"]) return;
+    const z = await npzOpen(fm["hand.npz"]);
+    const g = async k => (await z.get(k)).data;
+    o.hand = { t: await g("t"), has: await g("has_right"), kp: await g("kp2d"),
+               size: z.has("image_size") ? await g("image_size") : null, conf: z.has("det_conf") ? await g("det_conf") : null };
+  });
+  await step("video", async () => {
+    if (!fm["video.avi"]) return;
+    let t = null, cam = null;
+    if (fm["video_frames.npz"]) {
+      const z = await npzOpen(fm["video_frames.npz"]);
+      const ns = (await z.get("t_ns")).data;
+      t = new Float64Array(ns.length);
+      for (let i = 0; i < ns.length; i++) t[i] = ns[i] / 1e9;
+      if (z.has("cam_seq")) cam = (await z.get("cam_seq")).data;
+    }
+    if (!t) throw new Error("video_frames.npz가 없어 프레임 시각을 알 수 없습니다");
+    const ix = await aviIndex(fm["video.avi"]);
+    if (ix.n !== t.length) o.warnings.push(`영상 프레임 ${ix.n}개, 시각 ${t.length}개로 개수가 다릅니다. 앞에서부터 맞춥니다.`);
+    o.video = { file: fm["video.avi"], offs: ix.offs, sizes: ix.sizes, n: ix.n, t, cam };
+  });
+  if (!o.emg && !o.prompts && !o.hand && !o.video) throw new Error("읽을 수 있는 세션 파일이 없습니다 (emg.npz, prompts.npz, hand.npz, video.avi).");
+  return buildSession(o);
+}
+
+const KNOWN = new Set(["meta.json", "emg.npz", "prompts.npz", "hand.npz", "video.avi", "video_frames.npz"]);
+let groups = [];
+function ingest(list) {
+  const by = new Map();
+  for (const { path, file } of list) {
+    const parts = path.split("/").filter(Boolean), base = parts.pop() || file.name;
+    if (!KNOWN.has(base)) continue;
+    const dir = parts.join("/");
+    if (!by.has(dir)) by.set(dir, {});
+    by.get(dir)[base] = file;
+  }
+  groups = [...by.entries()].map(([dir, fm]) => ({ dir, name: dir.split("/").pop() || "고른 파일", fm }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const pick = $("sessPick");
+  if (!groups.length) { setStatus("세션 파일(meta.json, emg.npz, video.avi …)을 찾지 못했습니다. 세션 폴더나 그 안의 파일을 고르세요.", true); return; }
+  pick.innerHTML = groups.map((g, i) => `<option value="${i}">${esc(g.name)}</option>`).join("");
+  pick.hidden = groups.length < 2;
+  pick.value = String(groups.length - 1);
+  openGroup(groups.length - 1);
+}
+async function openGroup(i) {
+  const g = groups[i];
+  try {
+    const s = await loadFromFiles(g.name, g.fm);
+    setSession(s);
+    setStatus(s.warnings.length ? "일부를 읽지 못했습니다 · " + s.warnings.join(" · ") : "", !!s.warnings.length);
+  } catch (e) { console.error(e); setStatus(e.message, true); }
+}
+
+async function collectDrop(dt) {
+  const out = [];
+  const items = [...dt.items].map(it => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean);
+  if (!items.length) { for (const f of dt.files) out.push({ path: f.name, file: f }); return out; }
+  const walk = async (entry, prefix) => {
+    if (entry.isFile) {
+      if (!KNOWN.has(entry.name)) return;
+      const f = await new Promise((res, rej) => entry.file(res, rej));
+      out.push({ path: prefix + entry.name, file: f });
+    } else if (entry.isDirectory) {
+      const rd = entry.createReader();
+      let batch;
+      do {
+        batch = await new Promise((res, rej) => rd.readEntries(res, rej));
+        for (const e of batch) await walk(e, prefix + entry.name + "/");
+      } while (batch.length);
+    }
+  };
+  for (const e of items) await walk(e, "");
+  return out;
+}
+
+// ---------- example session (synthetic, clearly marked)
+function makeDemo() {
+  let seed = 20261014;
+  const rnd = () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const gauss = () => Math.sqrt(-2 * Math.log(1 - rnd())) * Math.cos(2 * Math.PI * rnd());
+  const plan = { sets: 1, reps: 2, ready_s: 1, hold_s: 3, rest_s: 2, seed: 7 };
+  let order;
+  do { order = []; for (let g = 1; g <= 9; g++) order.push(g, g); for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; } }
+  while (order.some((g, i) => i && g === order[i - 1]));
+  const T0 = 1000, start = T0 + 2.0, trialS = 6;
+  const P = { t: [], tp: [], kind: [], set: [], trial: [], label: [] };
+  const push = (tp, kind, trial, label) => { P.t.push(tp + 0.002 + rnd() * 0.008); P.tp.push(tp); P.kind.push(kind); P.set.push(0); P.trial.push(trial); P.label.push(label); };
+  push(start, "set_start", -1, 0); P.t[0] = start;
+  order.forEach((g, k) => { const a = start + k * trialS; push(a, "ready", k, g); push(a + 1, "hold", k, g); push(a + 4, "rest", k, g); });
+  push(start + order.length * trialS, "set_end", -1, 0);
+  const tEnd = start + order.length * trialS + 1.5;
+  const W = { 0: [.1,.1,.1,.1,.1,.1,.1,.1], 1: [.3,.5,.2,.6,.7,.4,.3,.2], 2: [.6,.4,.3,.3,.4,.5,.6,.95], 3: [.2,.3,.2,.7,.8,.8,.5,.3],
+    4: [.2,.6,.2,.5,.4,.2,.2,.2], 5: [.3,.55,.2,.6,.65,.35,.25,.2], 6: [.3,.5,.25,.6,.7,.5,.3,.25], 7: [.35,.45,.3,.65,.75,.65,.45,.3],
+    8: [.25,.3,.25,.7,.8,.8,.55,.3], 9: [.15,.2,.2,.45,.95,.9,.4,.2] };
+  // envelope: reaction ~0.3 s after the hold prompt, relax ~0.2 s into rest
+  const env = t => {
+    const k = Math.floor((t - start) / trialS);
+    if (k < 0 || k >= order.length) return [0, 0];
+    const x = t - start - k * trialS;
+    if (x < 1) return [order[k], 0];
+    if (x < 4) return [order[k], clamp((x - 1 - 0.3) / 0.25, 0, 1)];
+    return [order[k], clamp(1 - (x - 4 - 0.2) / 0.3, 0, 1)];
+  };
+  const fs = 488, gapA = start + 40.3, gapB = gapA + 3.4;
+  const tt = [], vv = [];
+  for (let t = T0 + 0.4; t < tEnd; t += 1 / fs) {
+    if (t > gapA && t < gapB) continue;
+    const [g, e] = env(t), w = W[g];
+    tt.push(t);
+    for (let c = 0; c < 8; c++) vv.push(clamp(Math.round(127 + gauss() * (2.5 + 34 * w[c] * e)), 0, 255));
+  }
+  // hand: a schematic right hand at 30 fps in a 640x480 frame
+  const ext = { 0: [.6,.55,.55,.55,.55], 1: [0,1,1,0,0], 2: [0,0,0,0,0], 3: [1,1,1,1,1], 4: [0,1,0,0,0], 5: [0,1,1,0,0],
+    6: [0,1,1,1,0], 7: [0,1,1,1,1], 8: [1,1,1,1,1], 9: [1,1,1,1,1] };
+  const bases = [[282, 372], [292, 300], [320, 290], [348, 296], [373, 312]];
+  const angs = [-150, -100, -90, -80, -68], lens = [[34, 28, 24], [46, 30, 24], [50, 33, 26], [46, 30, 24], [36, 25, 20]];
+  const ht = [], hh = [], hk = [];
+  for (let t = T0 + 0.5; t < tEnd; t += 1 / 30) {
+    const [g, e] = env(t), kp = new Array(42);
+    const wx = 322, wy = 418;
+    kp[0] = wx; kp[1] = wy;
+    for (let f = 0; f < 5; f++) {
+      const x0 = ext[0][f], x1 = ext[g][f], x = x0 + (x1 - x0) * e;
+      let ang = (f === 0 ? angs[0] + (1 - x) * 70 : angs[f]) * Math.PI / 180;
+      let px = bases[f][0], py = bases[f][1];
+      for (let j = 0; j < 4; j++) {
+        if (j) { const L = lens[f][j - 1] * (f === 0 ? 1 : 0.28 + 0.72 * x); px += Math.cos(ang) * L; py += Math.sin(ang) * L; ang += (f === 0 ? 0.25 : 0.12) * (1 - x); }
+        const id = 1 + f * 4 + j;
+        kp[id * 2] = px + gauss() * 0.6; kp[id * 2 + 1] = py + gauss() * 0.6;
+      }
+    }
+    if (g === 9 && e > 0) for (let j = 1; j < 21; j++) kp[j * 2 + 1] = wy + (kp[j * 2 + 1] - wy) * (1 - 0.38 * e);
+    ht.push(t); hh.push(t > gapA + 10 && t < gapA + 12 ? 0 : 1); hk.push(...kp);
+  }
+  const H = ht.length, size = new Int32Array(H * 2);
+  for (let i = 0; i < H; i++) { size[i * 2] = 640; size[i * 2 + 1] = 480; }
+  return buildSession({
+    name: "예시 세션", demo: true,
+    meta: { participant: "예시", note: "합성 데이터. 실제 녹화가 아닙니다.", created_local: "—", status: "example", t0_perf: T0,
+            t_end_perf: tEnd, plan, studio_commit: "—", emg: { fs_device_clock: fs } },
+    emg: { v: Uint8Array.from(vv), t: Float64Array.from(tt) },
+    prompts: { t: P.t, tp: P.tp, kind: P.kind, set: P.set, trial: P.trial, label: P.label, order: { shape: [1, order.length] } },
+    hand: { t: Float64Array.from(ht), has: Uint8Array.from(hh), kp: Float32Array.from(hk), size },
+  });
+}
+
+// ---------- view state
+let S = null, cur = 0, win = 10, gain = 1, speed = 1, playing = false, lastTick = 0, timeBase = "shown";
+let ovDirty = true, drawQueued = false;
+const ovBase = document.createElement("canvas");
+const vid = { want: -1, shown: -1, busy: false, bmp: null, w: 640, h: 480 };
+
+function setStatus(msg, err) { const el = $("status"); el.textContent = msg || ""; el.hidden = !msg; el.classList.toggle("err", !!err); }
+
+function setSession(s) {
+  S = s;
+  if (vid.bmp && vid.bmp.close) vid.bmp.close();
+  Object.assign(vid, { want: -1, shown: -1, bmp: null });
+  const sz = s.hand && s.hand.size && s.hand.size.length ? [s.hand.size[0], s.hand.size[1]] : [640, 480];
+  setAspect(sz[0], sz[1]);
+  $("notice").hidden = !s.demo;
+  const m = s.meta;
+  $("sessTitle").innerHTML = s.demo ? "<b>예시 세션</b> · 합성 데이터"
+    : `<b>${esc(m.participant || s.name)}</b> · ${esc(m.created_local || s.name)}${m.note ? " · " + esc(m.note) : ""}`;
+  const gp = $("gestPick"), keep = gp.value;
+  gp.innerHTML = `<option value="-1">전체</option>` + [1, 2, 3, 4, 5, 6, 7, 8, 9].map(l => `<option value="${l}">${esc(s.names[l])}</option>`).join("");
+  gp.value = [...gp.options].some(o => o.value === keep) ? keep : "-1";
+  const t0 = s.trials && s.trials[0], first = t0 ? (t0.hold ? t0.hold.a + 1.2 : (t0.ready || t0.hold).a) : s.Ts;
+  cur = clamp(first, s.Ts, s.Te);
+  setPlaying(false);
+  renderInfo();
+  ovDirty = true; requestDraw();
+}
+
+function setAspect(w, h) {
+  if (!(w > 0 && h > 0)) return;
+  vid.w = w; vid.h = h;
+  $("videoBox").style.aspectRatio = `${w} / ${h}`;
+}
+
+function seek(t) { if (!S) return; cur = clamp(t, S.Ts, S.Te); requestDraw(); }
+function setPlaying(p) {
+  playing = p && !!S;
+  $("play").textContent = playing ? "❚❚ 정지" : "▶ 재생";
+  if (playing) { if (cur >= S.Te - 0.01) cur = S.Ts; lastTick = performance.now(); requestDraw(); }
+}
+function requestDraw() { if (!drawQueued) { drawQueued = true; requestAnimationFrame(frame); } }
+function frame(now) {
+  drawQueued = false;
+  if (playing) {
+    cur += (now - lastTick) / 1000 * speed; lastTick = now;
+    if (cur >= S.Te) { cur = S.Te; setPlaying(false); }
+  }
+  if (!S) return;
+  drawEmg(); drawOverview(); updatePrompt(); updateVideo(); updateClock();
+  if (playing) requestDraw();
+}
+
+// ---------- prompt card
+const segA = s => timeBase === "plan" ? s.ap : s.a, segB = s => timeBase === "plan" ? s.bp : s.b;
+function segAt(t) {
+  if (!S || !S.segs) return null;
+  const segs = S.segs;
+  let lo = 0, hi = segs.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (segA(segs[m]) <= t) lo = m + 1; else hi = m; }
+  const s = segs[lo - 1];
+  return s && t < segB(s) ? s : null;
+}
+function updatePrompt() {
+  const s = segAt(cur), ph = $("pPhase"), card = $("promptCard");
+  if (!S.segs) {
+    ph.className = "chip"; ph.textContent = "안내 기록 없음"; $("pName").textContent = "—"; $("pHow").textContent = "";
+    $("pWhere").textContent = ""; $("pMore").textContent = ""; $("pBar").style.width = "0"; return;
+  }
+  if (!s) {
+    const before = S.trials.length && cur < (S.trials[0].ready || S.trials[0].hold).a;
+    const after = S.trials.length && cur >= S.segs[S.segs.length - 1].b;
+    ph.className = "chip"; ph.textContent = before ? "시작 전" : after ? "끝" : "세트 사이";
+    card.style.removeProperty("--gc");
+    $("pName").innerHTML = "—"; $("pHow").textContent = "";
+    $("pWhere").textContent = ""; $("pBar").style.width = "0";
+    const nx = S.trials.find(t => (t.ready || t.hold).a > cur);
+    $("pMore").innerHTML = nx ? `다음 <b>${esc(S.names[nx.label])}</b>` : "";
+    return;
+  }
+  card.style.setProperty("--gc", gColor(s.label));
+  ph.className = "chip " + (s.kind === "rest" ? "" : s.kind);
+  ph.textContent = PHASE_KO[s.kind] + (s.kind === "rest" ? " · 손 풀기" : "");
+  $("pName").innerHTML = `${esc(S.names[s.label])}<small>${esc(KEYS0[s.label] || "")} · ${s.label}</small>`;
+  $("pHow").textContent = S.how[s.label] || "";
+  $("pWhere").innerHTML = `세트 <b>${s.set + 1}</b>/${S.nSets || "?"} · 시행 <b>${s.trial + 1}</b>/${S.perSet || "?"}`;
+  const a = segA(s), b = segB(s);
+  $("pBar").style.width = (clamp((cur - a) / (b - a), 0, 1) * 100).toFixed(1) + "%";
+  const k = S.trials.findIndex(t => t.set === s.set && t.trial === s.trial), nx = S.trials[k + 1];
+  $("pMore").innerHTML = `구간 <b>${(cur - a).toFixed(2)}</b>/${(b - a).toFixed(2)} s · 안내 지연 <b>${(s.lag * 1000 >= 0 ? "+" : "") + (s.lag * 1000).toFixed(1)} ms</b>`
+    + (nx ? ` · 다음 <b>${esc(S.names[nx.label])}</b>` : "");
+}
+function updateClock() {
+  $("clock").innerHTML = `${fmtClock(cur - S.T0)}<small>perf ${cur.toFixed(3)}</small>`;
+}
+
+// ---------- canvases
+function fit(cv) {
+  const d = devicePixelRatio || 1, r = cv.getBoundingClientRect();
+  const w = Math.max(1, Math.round(r.width * d)), h = Math.max(1, Math.round(r.height * d));
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; return true; }
+  return false;
+}
+function tickStep(span, px, minPx) {
+  for (const s of [0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]) if (s / span * px >= minPx) return s;
+  return 1200;
+}
+function tickLabel(t, step) {
+  if (step >= 60 || Math.abs(t) >= 60) { const m = Math.floor(t / 60), s = t - m * 60; return `${m}:${(step < 1 ? s.toFixed(1) : Math.round(s).toString()).padStart(step < 1 ? 4 : 2, "0")}`; }
+  return step < 1 ? t.toFixed(step < 0.1 ? 2 : 1) : t.toFixed(0);
+}
+
+function drawEmg() {
+  const cv = $("emgCv"); fit(cv);
+  const g = cv.getContext("2d"), d = devicePixelRatio || 1, W = cv.width, H = cv.height;
+  g.fillStyle = C.panel; g.fillRect(0, 0, W, H);
+  const L = 46 * d, R = 10 * d, top = 22 * d, axis = 22 * d, PW = W - L - R, laneH = (H - top - axis) / 8;
+  const a = cur - win / 2, b = cur + win / 2, X = t => L + (t - a) / (b - a) * PW;
+  g.font = `${11 * d}px ${C.font}`; g.textBaseline = "middle";
+
+  g.save(); g.beginPath(); g.rect(L, 0, PW, H); g.clip();
+  if (S.segs) for (const s of S.segs) {
+    const sa = segA(s), sb = segB(s);
+    if (sb < a || sa > b || s.kind === "rest") continue;
+    const x0 = X(sa), x1 = X(sb), col = gColor(s.label);
+    g.fillStyle = rgba(col, s.kind === "hold" ? 0.16 : 0.06);
+    g.fillRect(x0, top, x1 - x0, H - top - axis);
+    g.fillStyle = col; g.fillRect(x0, top - 6 * d, x1 - x0, s.kind === "hold" ? 4 * d : 2 * d);
+    if (s.kind === "hold") {
+      g.fillStyle = col; g.textAlign = "left";
+      g.font = `500 ${12 * d}px ${C.font}`;
+      g.fillText(S.names[s.label], Math.max(x0, L) + 4 * d, top - 14 * d);
+      g.font = `${11 * d}px ${C.font}`;
+    }
+  }
+  if (S.emg) {
+    g.fillStyle = rgba(C.bad, 0.10);
+    for (const [ga, gb] of S.emg.gaps) if (gb > a && ga < b) {
+      g.fillRect(X(ga), top, X(gb) - X(ga), H - top - axis);
+      if (X(gb) - X(ga) > 60 * d) { g.fillStyle = C.bad; g.textAlign = "center"; g.fillText(`EMG 끊김 ${(gb - ga).toFixed(1)} s`, (Math.max(X(ga), L) + Math.min(X(gb), L + PW)) / 2, top + 10 * d); g.fillStyle = rgba(C.bad, 0.10); }
+    }
+  }
+  g.restore();
+
+  g.strokeStyle = C.line; g.lineWidth = 1;
+  for (let c = 0; c < 8; c++) {
+    const y = top + laneH * (c + 0.5);
+    g.beginPath(); g.moveTo(L, Math.round(y) + 0.5); g.lineTo(L + PW, Math.round(y) + 0.5); g.stroke();
+    g.fillStyle = C.ch[c]; g.textAlign = "right"; g.fillText("ch" + (c + 1), L - 8 * d, y);
+  }
+
+  if (S.emg) {
+    const { v, tm, n } = S.emg;
+    const i0 = Math.max(0, lb(tm, a) - 1), i1 = Math.min(n, lb(tm, b) + 1), cnt = i1 - i0;
+    const amp = laneH / 2 * 0.92 * gain / S.emg.scale;
+    g.save(); g.beginPath(); g.rect(L, top, PW, H - top - axis); g.clip();
+    g.lineWidth = Math.max(1, d * 0.9); g.lineJoin = "round";
+    const cols = Math.ceil(PW);
+    for (let c = 0; c < 8; c++) {
+      const yc = top + laneH * (c + 0.5);
+      g.strokeStyle = C.ch[c]; g.beginPath();
+      if (cnt < cols * 1.5) {
+        let pen = false;
+        for (let i = i0; i < i1; i++) {
+          const x = X(tm[i]), y = yc - (v[i * 8 + c] - 127) * amp;
+          if (!pen || tm[i] - tm[i - 1] > GAP_S) { g.moveTo(x, y); pen = true; } else g.lineTo(x, y);
+        }
+      } else {
+        const mn = new Float32Array(cols).fill(Infinity), mx = new Float32Array(cols).fill(-Infinity);
+        for (let i = i0; i < i1; i++) {
+          const k = Math.floor((tm[i] - a) / (b - a) * PW);
+          if (k < 0 || k >= cols) continue;
+          const y = v[i * 8 + c] - 127;
+          if (y < mn[k]) mn[k] = y; if (y > mx[k]) mx[k] = y;
+        }
+        for (let k = 0; k < cols; k++) if (mn[k] !== Infinity) { const x = L + k + 0.5; g.moveTo(x, yc - mx[k] * amp); g.lineTo(x, yc - mn[k] * amp + 0.5); }
+      }
+      g.stroke();
+    }
+    g.restore();
+  } else {
+    g.fillStyle = C.muted; g.textAlign = "center"; g.fillText("EMG 파일(emg.npz)이 없습니다", L + PW / 2, H / 2);
+  }
+
+  // time axis, relative to t0
+  const step = tickStep(win, PW, 80 * d);
+  g.fillStyle = C.muted; g.strokeStyle = C.line; g.textAlign = "center";
+  for (let t = Math.ceil((a - S.T0) / step) * step; t <= b - S.T0; t += step) {
+    const x = X(t + S.T0);
+    g.beginPath(); g.moveTo(Math.round(x) + 0.5, H - axis); g.lineTo(Math.round(x) + 0.5, H - axis + 5 * d); g.stroke();
+    g.fillText(tickLabel(t, step), x, H - axis / 2 + 2 * d);
+  }
+  const cx = Math.round(X(cur)) + 0.5;
+  g.strokeStyle = C.cursor; g.lineWidth = Math.max(1, d);
+  g.beginPath(); g.moveTo(cx, top - 6 * d); g.lineTo(cx, H - axis); g.stroke();
+  g.fillStyle = C.muted; g.textAlign = "right";
+  g.fillText(`±${(S.emg ? S.emg.scale / gain : 128).toFixed(0)}`, L - 8 * d, top - 10 * d);
+}
+
+const OV_ROWS = () => ({ label: 12, heat: 8 * 9, hand: 8, gap: 6, axis: 18 });
+function drawOverview() {
+  const cv = $("ovCv"), resized = fit(cv);
+  const d = devicePixelRatio || 1, W = cv.width, H = cv.height, L = 46 * d, R = 10 * d, PW = W - L - R;
+  const X = t => L + (t - S.Ts) / (S.Te - S.Ts) * PW;
+  if (resized || ovDirty || ovBase.width !== W || ovBase.height !== H) {
+    ovBase.width = W; ovBase.height = H; ovDirty = false;
+    const g = ovBase.getContext("2d"), r = OV_ROWS();
+    g.fillStyle = C.panel; g.fillRect(0, 0, W, H);
+    const total = r.label + 4 + r.heat + 4 + r.hand + 4 + r.gap + r.axis, s = H / total;
+    let y = 8 * d;
+    const rowH = k => r[k] * s;
+    g.font = `${10 * d}px ${C.font}`; g.textBaseline = "middle"; g.textAlign = "right";
+    const lbl = (txt, y0, h, col) => { g.fillStyle = col || C.muted; g.fillText(txt, L - 8 * d, y0 + h / 2); };
+    // prompts
+    const hL = rowH("label") - 4 * d;
+    lbl("안내", y, hL);
+    if (S.segs) for (const sg of S.segs) {
+      if (sg.kind === "rest") continue;
+      g.fillStyle = sg.kind === "hold" ? gColor(sg.label) : rgba(gColor(sg.label), 0.35);
+      const x0 = X(sg.a), x1 = X(sg.b);
+      g.fillRect(x0, y, Math.max(1, x1 - x0), hL);
+    }
+    y += hL + 6 * d;
+    // EMG heat rows
+    const hH = (H - y - (rowH("hand") + rowH("gap") + rowH("axis") + 10 * d)) / 8;
+    for (let c = 0; c < 8; c++) {
+      lbl(String(c + 1), y + c * hH, hH, C.ch[c]);
+      if (!S.emg) continue;
+      for (let bI = 0; bI < S.ovB; bI++) {
+        const val = S.heat[c * S.ovB + bI];
+        if (val !== val) continue;
+        g.fillStyle = rgba(C.ch[c], clamp(val / S.heatScale, 0.03, 1));
+        const x0 = L + bI / S.ovB * PW;
+        g.fillRect(x0, y + c * hH, PW / S.ovB + 0.6, hH - 1);
+      }
+    }
+    y += 8 * hH + 4 * d;
+    const hHand = rowH("hand");
+    lbl("손", y, hHand);
+    if (S.hand) for (let bI = 0; bI < S.ovB; bI++) {
+      const f = S.handFrac[bI];
+      if (f !== f) continue;
+      g.fillStyle = rgba(C.fg, 0.08 + 0.6 * f);
+      g.fillRect(L + bI / S.ovB * PW, y, PW / S.ovB + 0.6, hHand);
+    }
+    y += hHand + 4 * d;
+    const hGap = rowH("gap");
+    lbl("끊김", y, hGap, S.emg && S.emg.gaps.length ? C.bad : C.muted);
+    if (S.emg) { g.fillStyle = C.bad; for (const [ga, gb] of S.emg.gaps) g.fillRect(X(ga), y, Math.max(2 * d, X(gb) - X(ga)), hGap); }
+    y += hGap;
+    // set boundaries + axis
+    g.strokeStyle = C.line; g.fillStyle = C.muted; g.textAlign = "center";
+    for (const st of S.sets || []) { const x = Math.round(X(st.a)) + 0.5; g.beginPath(); g.moveTo(x, 4 * d); g.lineTo(x, y); g.stroke(); }
+    const span = S.Te - S.Ts, step = tickStep(span, PW, 70 * d);
+    for (let t = Math.ceil((S.Ts - S.T0) / step) * step; t <= S.Te - S.T0; t += step) g.fillText(tickLabel(t, step), X(t + S.T0), y + (H - y) / 2 + 1 * d);
+  }
+  const g = cv.getContext("2d");
+  g.drawImage(ovBase, 0, 0);
+  const x0 = X(cur - win / 2), x1 = X(cur + win / 2);
+  g.fillStyle = rgba(C.cursor, 0.10); g.fillRect(x0, 0, Math.max(2 * d, x1 - x0), H - 16 * d);
+  g.strokeStyle = C.cursor; g.lineWidth = Math.max(1, d);
+  const cx = Math.round(X(cur)) + 0.5;
+  g.beginPath(); g.moveTo(cx, 0); g.lineTo(cx, H - 16 * d); g.stroke();
+}
+
+// ---------- video + hand overlay
+function videoIndexAt(t) {
+  const V = S.video;
+  if (!V) return -1;
+  const i = lb(V.t, t + 1e-6, 0, V.n) - 1;
+  return i >= 0 && t - V.t[i] < 0.5 ? i : -1;
+}
+function updateVideo() {
+  const i = videoIndexAt(cur);
+  vid.want = i;
+  if (i >= 0 && i !== vid.shown) pumpVideo(); else drawVideo();
+}
+async function pumpVideo() {
+  if (vid.busy || vid.want < 0 || vid.want === vid.shown) return;
+  vid.busy = true;
+  const i = vid.want, V = S.video, sess = S;
+  try {
+    const bmp = await createImageBitmap(V.file.slice(V.offs[i], V.offs[i] + V.sizes[i], "image/jpeg"));
+    if (sess !== S) { bmp.close && bmp.close(); return; }
+    if (vid.bmp && vid.bmp.close) vid.bmp.close();
+    vid.bmp = bmp; vid.shown = i;
+    if (bmp.width !== vid.w || bmp.height !== vid.h) setAspect(bmp.width, bmp.height);
+  } catch (e) { console.warn("frame", i, e); vid.shown = i; vid.bmp = null; }
+  finally { vid.busy = false; }
+  drawVideo();
+  if (vid.want !== vid.shown) pumpVideo();
+}
+function handIndexNear(t) {
+  const Hn = S.hand;
+  if (!Hn) return -1;
+  const i = lb(Hn.t, t);
+  let best = -1, bd = 0.12;
+  for (const j of [i - 1, i]) if (j >= 0 && j < Hn.n && Math.abs(Hn.t[j] - t) < bd) { bd = Math.abs(Hn.t[j] - t); best = j; }
+  return best;
+}
+function drawVideo() {
+  const cv = $("vidCv"); fit(cv);
+  const g = cv.getContext("2d"), d = devicePixelRatio || 1, W = cv.width, H = cv.height;
+  g.fillStyle = C.raised; g.fillRect(0, 0, W, H);
+  const sc = Math.min(W / vid.w, H / vid.h), ox = (W - vid.w * sc) / 2, oy = (H - vid.h * sc) / 2;
+  const vi = videoIndexAt(cur);
+  const showBmp = vid.bmp && vi >= 0 && vid.shown >= 0;
+  if (showBmp) g.drawImage(vid.bmp, ox, oy, vid.w * sc, vid.h * sc);
+  else {
+    g.fillStyle = C.muted; g.font = `${12 * d}px ${C.font}`; g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText(S.video ? (vi < 0 ? "이 시각에는 영상 프레임이 없습니다" : "프레임 읽는 중…") : "영상 없음", W / 2, 18 * d);
+  }
+  const tRef = showBmp ? S.video.t[vid.shown] : cur;
+  const hi = handIndexNear(tRef);
+  let tag = "";
+  if (S.video) tag += vi >= 0 ? `프레임 ${vi + 1}/${S.video.n}` : "프레임 —";
+  if (S.hand) {
+    if (hi >= 0 && S.hand.has[hi]) {
+      const kp = S.hand.kp, o = hi * 42;
+      const iw = S.hand.size ? S.hand.size[hi * 2] : vid.w, ih = S.hand.size ? S.hand.size[hi * 2 + 1] : vid.h;
+      const s2 = Math.min(W / iw, H / ih), ox2 = (W - iw * s2) / 2, oy2 = (H - ih * s2) / 2;
+      const P = j => [ox2 + kp[o + j * 2] * s2, oy2 + kp[o + j * 2 + 1] * s2];
+      const seg = S.segs ? segAt(cur) : null, col = seg && seg.kind !== "rest" ? gColor(seg.label) : C.accent;
+      g.lineCap = "round"; g.lineWidth = 2.2 * d; g.strokeStyle = col;
+      g.beginPath();
+      for (const [p, q] of BONES) { const A = P(p), B = P(q); g.moveTo(A[0], A[1]); g.lineTo(B[0], B[1]); }
+      g.stroke();
+      for (let j = 0; j < 21; j++) {
+        const [x, y] = P(j);
+        g.fillStyle = j % 4 === 0 ? C.cursor : col;
+        g.beginPath(); g.arc(x, y, (j === 0 ? 4 : 2.6) * d, 0, Math.PI * 2); g.fill();
+      }
+      tag += (tag ? " · " : "") + "오른손" + (S.hand.conf && S.hand.conf[hi] === S.hand.conf[hi] ? " " + S.hand.conf[hi].toFixed(2) : "");
+    } else tag += (tag ? " · " : "") + (hi >= 0 ? "오른손 미검출" : "손 추정 없음");
+  }
+  $("vidTag").textContent = tag;
+  $("vidTag").hidden = !tag;
+}
+
+// ---------- session info
+function renderInfo() {
+  const m = S.meta, E = S.emg, dl = [], checks = [];
+  const add = (k, v) => dl.push(`<dt>${k}</dt><dd>${v}</dd>`);
+  const chk = (lvl, txt) => checks.push(`<span class="check ${lvl}">${txt}</span>`);
+  add("참가자", esc(m.participant || "—"));
+  if (m.note) add("노트", esc(m.note));
+  add("녹화 시각", esc(m.created_local || "—"));
+  add("상태", esc(m.status || "—") + (m.prompts ? ` · 시행 ${m.prompts.trials_done}개` : S.trials ? ` · 시행 ${S.trials.length}개` : ""));
+  if (m.plan) add("계획", `${m.plan.sets}세트 × ${m.plan.reps}회 × 9동작 · 준비 ${m.plan.ready_s} · 유지 ${m.plan.hold_s} · 휴식 ${m.plan.rest_s} s · seed <code>${m.plan.seed}</code>`);
+  add("길이", fmtDur(S.Te - S.Ts));
+  if (E) {
+    const gapT = E.gaps.reduce((a, [x, y]) => a + y - x, 0), gapMax = E.gaps.reduce((a, [x, y]) => Math.max(a, y - x), 0);
+    add("EMG", `${E.n.toLocaleString()} 샘플 · ${E.fs.toFixed(1)} Hz (샘플 시각 기준)` + (m.emg && m.emg.fs_device_clock && !E.resets ? ` · 기기 시계 ${m.emg.fs_device_clock.toFixed(1)} Hz` : ""));
+    const longGaps = E.gaps.filter(([x, y]) => y - x >= 1).length;
+    add("EMG 끊김", E.gaps.length ? `${E.gaps.length}구간 (1 s 이상 ${longGaps}) · 합 ${gapT.toFixed(1)} s · 최대 ${gapMax.toFixed(1)} s` : "없음");
+    if (E.resets) add("기기 시계 리셋", `${E.resets}회 (밴드가 다시 켜졌을 수 있음)`);
+    chk(gapT > 30 ? "bad" : gapT > 3 ? "warn" : "ok", E.gaps.length ? `EMG 끊김 합 ${gapT.toFixed(0)} s · 1 s 이상 ${longGaps}구간` : "EMG 끊김 없음");
+    if (E.resets) chk("bad", `기기 시계 리셋 ${E.resets}회`);
+    if (S.segs) {
+      const holds = S.segs.filter(s => s.kind === "hold");
+      const ok = holds.filter(h => !E.gaps.some(([x, y]) => y > h.a && x < h.b) && h.a >= E.tm[0] && h.b <= E.tm[E.n - 1]).length;
+      chk(ok === holds.length ? "ok" : ok / holds.length > 0.9 ? "warn" : "bad", `EMG 온전한 유지 구간 ${ok}/${holds.length}`);
+    }
+    const medCh = median([...S.chAll]);
+    const dead = [...S.chAll].map((x, c) => [x, c]).filter(([x]) => x < medCh * 0.3).map(([, c]) => "ch" + (c + 1));
+    if (dead.length) chk("warn", `신호 약함: ${dead.join(", ")}`);
+  }
+  const bs = m.emg && m.emg.battery_start, be = m.emg && m.emg.battery_end;
+  if (bs != null) add("배터리", `${bs}% → ${be}%`);
+  if (S.video) {
+    add("영상", `${S.video.n.toLocaleString()} 프레임 · 실측 ${S.video.fps.toFixed(1)} fps · 카메라 누락 ${S.video.missing}` + (m.video && m.video.dropped ? ` · 기록 누락 ${m.video.dropped}` : ""));
+    chk(S.video.fps >= 25 ? "ok" : S.video.fps >= 15 ? "warn" : "bad", `영상 ${S.video.fps.toFixed(1)} fps`);
+  } else if (!S.demo) chk("warn", "영상 없음");
+  if (S.hand) {
+    const p = S.hand.withRight / S.hand.n;
+    add("손 추정", `${S.hand.n.toLocaleString()} 프레임 · 오른손 ${S.hand.withRight.toLocaleString()} (${(p * 100).toFixed(0)}%)`);
+    chk(p >= 0.8 ? "ok" : p >= 0.5 ? "warn" : "bad", `오른손 인식 ${(p * 100).toFixed(0)}%`);
+  }
+  if (S.segs) {
+    const lags = S.segs.map(s => s.lag * 1000);
+    const med = median(lags), mx = Math.max(...lags);
+    add("안내 지연", `중앙값 ${med.toFixed(1)} ms · 최대 ${mx.toFixed(1)} ms (화면에 뜬 시각 − 예정 시각)`);
+    chk(mx < 50 ? "ok" : "warn", `안내 지연 최대 ${mx.toFixed(0)} ms`);
+  }
+  if (m.studio_commit) add("스튜디오", `<code>${esc(m.studio_commit)}</code>${m.emg_source ? " · " + esc(m.emg_source) : ""}`);
+  if (m.wear_rules) add("착용 규칙", esc(m.wear_rules));
+  $("metaList").innerHTML = dl.join("");
+  $("checks").innerHTML = checks.join("");
+
+  const mxv = Math.max(1, ...S.chAll, ...[...S.chHold].filter(x => x === x));
+  $("chBars").innerHTML = S.emg ? [...Array(8).keys()].map(c => {
+    const h = S.chHold[c], a = S.chAll[c], col = `var(--ch${c + 1})`;
+    return `<div class="chbar"><span style="color:${col}">ch${c + 1}</span><span class="track">`
+      + `<i class="all" style="width:${(a / mxv * 100).toFixed(1)}%;background:${col}"></i>`
+      + (h === h ? `<i style="width:${(h / mxv * 100).toFixed(1)}%;background:${col};height:50%;top:25%"></i>` : "")
+      + `</span><span>${(h === h ? h : a).toFixed(1)}</span></div>`;
+  }).join("") : `<p class="legend">EMG 파일이 없습니다.</p>`;
+  $("gLegend").innerHTML = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(l => `<span style="--c:var(--g${l})">${esc(S.names[l])}</span>`).join("");
+}
+
+// ---------- navigation
+function jumpTrial(dir) {
+  if (!S || !S.trials) return;
+  const f = +$("gestPick").value, start = t => (t.ready || t.hold).a;
+  const list = S.trials.filter(t => f < 0 || t.label === f);
+  if (!list.length) return;
+  let t;
+  if (dir > 0) t = list.find(x => start(x) - 0.5 > cur + 0.05);
+  else t = [...list].reverse().find(x => start(x) - 0.5 < cur - 0.3);
+  if (t) seek(start(t) - 0.5);
+}
+function stepFrame(dir) {
+  if (!S) return;
+  if (S.video) {
+    const i = videoIndexAt(cur), j = clamp((i < 0 ? lb(S.video.t, cur) - (dir < 0 ? 1 : 0) : i + dir), 0, S.video.n - 1);
+    seek(S.video.t[j]);
+  } else seek(cur + dir / 30);
+}
+
+// ---------- wiring
+$("play").onclick = () => setPlaying(!playing);
+$("prevTrial").onclick = () => jumpTrial(-1);
+$("nextTrial").onclick = () => jumpTrial(1);
+$("speedPick").onchange = e => { speed = +e.target.value; };
+$("winPick").onchange = e => { win = +e.target.value; requestDraw(); };
+$("gainPick").onchange = e => { gain = +e.target.value; requestDraw(); };
+$("timeBase").onchange = e => { timeBase = e.target.value; requestDraw(); };
+$("sessPick").onchange = e => openGroup(+e.target.value);
+$("demoBtn").onclick = () => { $("sessPick").hidden = true; setStatus(""); setSession(makeDemo()); };
+for (const id of ["folderIn", "filesIn"]) $(id).onchange = e => {
+  const fl = [...e.target.files];
+  if (fl.length) ingest(fl.map(f => ({ path: f.webkitRelativePath || f.name, file: f })));
+  e.target.value = "";
+};
+
+let dragDepth = 0;
+addEventListener("dragenter", e => { if ([...e.dataTransfer.types].includes("Files")) { dragDepth++; $("drop").hidden = false; e.preventDefault(); } });
+addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; $("drop").hidden = true; } });
+addEventListener("dragover", e => e.preventDefault());
+addEventListener("drop", async e => {
+  e.preventDefault(); dragDepth = 0; $("drop").hidden = true;
+  try { ingest(await collectDrop(e.dataTransfer)); } catch (err) { setStatus(err.message, true); }
+});
+
+addEventListener("keydown", e => {
+  if (!S || e.target.tagName === "INPUT" || e.altKey || e.ctrlKey || e.metaKey) return;
+  if (e.key === " " && e.target.tagName !== "SELECT" && e.target.tagName !== "BUTTON") { e.preventDefault(); setPlaying(!playing); }
+  else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+    if (e.target.tagName === "SELECT") return;
+    e.preventDefault();
+    const dir = e.key === "ArrowRight" ? 1 : -1;
+    if (e.shiftKey) seek(cur + dir); else stepFrame(dir);
+  } else if (e.key === "]") jumpTrial(1);
+  else if (e.key === "[") jumpTrial(-1);
+});
+
+// EMG scope: drag to pan, wheel to change the window
+(() => {
+  const cv = $("emgCv");
+  let drag = null;
+  cv.addEventListener("pointerdown", e => { if (!S) return; drag = { x: e.clientX, t: cur, w: cv.getBoundingClientRect().width - 56 }; cv.setPointerCapture(e.pointerId); cv.classList.add("drag"); });
+  cv.addEventListener("pointermove", e => { if (drag) seek(drag.t - (e.clientX - drag.x) / drag.w * win); });
+  const end = () => { drag = null; cv.classList.remove("drag"); };
+  cv.addEventListener("pointerup", end); cv.addEventListener("pointercancel", end);
+  cv.addEventListener("wheel", e => {
+    if (!S || !(e.ctrlKey || e.metaKey)) return;     // plain wheel scrolls the page
+    e.preventDefault();
+    const opts = [1, 2, 5, 10, 30, 60], k = opts.indexOf(win);
+    win = opts[clamp((k < 0 ? 3 : k) + (e.deltaY > 0 ? 1 : -1), 0, opts.length - 1)];
+    $("winPick").value = String(win); requestDraw();
+  }, { passive: false });
+})();
+// overview: press or drag to seek
+(() => {
+  const cv = $("ovCv");
+  let down = false;
+  const at = e => { const r = cv.getBoundingClientRect(), L = 46, PW = r.width - L - 10; seek(S.Ts + clamp((e.clientX - r.left - L) / PW, 0, 1) * (S.Te - S.Ts)); };
+  cv.addEventListener("pointerdown", e => { if (!S) return; down = true; cv.setPointerCapture(e.pointerId); at(e); });
+  cv.addEventListener("pointermove", e => { if (down) at(e); });
+  cv.addEventListener("pointerup", () => { down = false; });
+  cv.addEventListener("pointercancel", () => { down = false; });
+})();
+
+new ResizeObserver(() => { ovDirty = true; requestDraw(); }).observe(document.body);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", readTheme);
+new MutationObserver(readTheme).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+readTheme();
+if (document.fonts) document.fonts.ready.then(() => { ovDirty = true; requestDraw(); });
+setSession(makeDemo());
+</script>
+</body>
+</html>
