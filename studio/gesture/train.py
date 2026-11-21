@@ -167,6 +167,35 @@ def check_twin(net: Net, g: gn.GestureNet, X: np.ndarray) -> float:
     return float(np.abs(ref - g.log_proba(X, g.train_stats)).max())
 
 
+def build_map(g: gn.GestureNet, X: np.ndarray, Y: np.ndarray, U: np.ndarray, n_max: int = 4000,
+              seed: int = 0) -> gn.SignalMap | None:
+    """t-SNE of training windows' embeddings, each placement adapted on its own windows like the
+    live window after calibration."""
+    try:
+        from sklearn.manifold import TSNE
+    except ImportError:
+        print("scikit-learn이 없어 실시간 지도는 건너뜁니다")
+        return None
+    E = np.zeros((len(X), 64))
+    for u in np.unique(U):
+        m = U == u
+        place = gn.Placement.estimate(g, X[m])
+        E[m] = g.embed(X[m] / place.rms[None, :, None], place.stats)
+    rng = np.random.default_rng(seed)
+    pick = []
+    for c in np.unique(Y):                                   # same share per class
+        idx = np.flatnonzero(Y == c)
+        pick += list(rng.choice(idx, min(len(idx), n_max // len(np.unique(Y))), replace=False))
+    pick = np.sort(np.array(pick))
+    mu, sd = E[pick].mean(0), E[pick].std(0) + 1e-6
+    Z = (E[pick] - mu) / sd
+    xy = TSNE(2, perplexity=40, init="pca", random_state=seed).fit_transform(Z)
+    xy = (xy - np.median(xy, 0)) / np.percentile(np.abs(xy - np.median(xy, 0)), 99, axis=0)
+    m = gn.SignalMap(Z.astype(np.float32), xy.astype(np.float32), Y[pick].astype(np.int16), mu, sd)
+    print(f"실시간 지도: 학습 창 {len(pick)}개로 t-SNE")
+    return m
+
+
 def smoothed_accuracy(g: gn.GestureNet, place: gn.Placement, X, Y, TR, TT) -> tuple[float, dict]:
     """Balanced accuracy of the live decision (0.4 s smoothing inside each hold / rest phase)."""
     lp = g.log_proba(X / place.rms[None, :, None], place.stats)
@@ -235,6 +264,7 @@ def main(argv=None) -> None:
             "studio_commit": ds._commit()}
     g = export(net, rms, meta)
     diff = check_twin(net, g, Xn[:256])
+    g.map = build_map(g, X, Y, U)
     if diff > 1e-3:
         raise SystemExit(f"numpy 계산이 PyTorch와 다릅니다 (최대 차이 {diff:g})")
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)

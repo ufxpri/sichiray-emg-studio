@@ -90,3 +90,39 @@ def test_replay_scores_a_recorded_session(tmp_path):
     r = replay(str(sess), str(tmp_path / "m.npz"), calib_s=12)
     assert r["calib_windows"] >= 100 and r["scored"] > 50
     assert 0 <= r["balanced_acc"] <= 1 and set(r["recall"]) <= {0, 1, 2, 3}
+
+
+def _d(label, p, classes=(0, 1, 2)):
+    pr = np.full(len(classes), (1 - p) / (len(classes) - 1))
+    pr[list(classes).index(label)] = p
+    return gn.Decision(0.0, pr, pr, label)
+
+
+def test_stabilizer_ignores_flicker_and_switches_on_a_steady_change():
+    st = gn.Stabilizer(min_prob=0.6, hold=3)
+    for lab in (1, 1, 1):
+        st.update(_d(lab, 0.9))
+    assert st.shown == 1
+    for lab in (2, 1, 2, 1, 2, 2, 1):                  # flicker: never 3 in a row
+        st.update(_d(lab, 0.9))
+    assert st.shown == 1
+    for _ in range(2):
+        st.update(_d(2, 0.5))                          # 3 in a row but not confident enough
+    st.update(_d(2, 0.5))
+    assert st.shown == 1
+    for _ in range(3):
+        st.update(_d(2, 0.8))
+    assert st.shown == 2
+
+
+def test_signal_map_places_reference_points_on_themselves():
+    r = np.random.default_rng(6)
+    centres = r.normal(0, 5, (3, 64))
+    lab = np.repeat([0, 1, 2], 40)
+    emb = centres[lab] + r.normal(0, 0.3, (120, 64))
+    xy = np.array([[-1, 0], [1, 0], [0, 1]], float)[lab] + r.normal(0, 0.05, (120, 2))
+    mu, sd = emb.mean(0), emb.std(0)
+    m = gn.SignalMap(((emb - mu) / sd).astype(np.float32), xy, lab, mu, sd)
+    new = centres + r.normal(0, 0.3, (3, 64))          # unseen windows of each class
+    got = m.place(new)
+    assert np.allclose(got, [[-1, 0], [1, 0], [0, 1]], atol=0.1)

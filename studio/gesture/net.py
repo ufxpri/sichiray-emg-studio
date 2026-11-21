@@ -77,6 +77,7 @@ class GestureNet:
     train_stats: BNStats                               # BatchNorm statistics of the training data
     train_rms: np.ndarray                              # mean channel RMS of the training placements
     meta: dict = field(default_factory=dict)           # labels, names, people, fs, ...
+    map: "SignalMap | None" = None                     # t-SNE of training windows, for the live map
 
     @property
     def classes(self) -> list[int]:
@@ -98,7 +99,11 @@ class GestureNet:
         return self._layers(x.astype(np.float64), stats)
 
     def log_proba(self, x: np.ndarray, stats: BNStats) -> np.ndarray:
-        z = self.embed(x, stats) @ self.fc[0].T + self.fc[1]
+        return self.head(self.embed(x, stats))
+
+    def head(self, e: np.ndarray) -> np.ndarray:
+        """Embeddings (N, 64) -> log-probabilities (N, classes)."""
+        z = e @ self.fc[0].T + self.fc[1]
         z -= z.max(axis=1, keepdims=True)
         return z - np.log(np.exp(z).sum(axis=1, keepdims=True))
 
@@ -115,6 +120,9 @@ class GestureNet:
         for i, ((w, b, s), (g, be)) in enumerate(zip(self.conv, self.bn)):
             arr |= {f"c{i}_w": w, f"c{i}_b": b, f"c{i}_s": np.array(s), f"bn{i}_g": g, f"bn{i}_b": be,
                     f"bn{i}_m": self.train_stats.mean[i], f"bn{i}_v": self.train_stats.var[i]}
+        if self.map is not None:
+            arr |= {"map_emb": self.map.emb, "map_xy": self.map.xy, "map_label": self.map.label,
+                    "map_mu": self.map.mu, "map_sd": self.map.sd}
         np.savez(path, **arr)
 
     @classmethod
@@ -127,7 +135,30 @@ class GestureNet:
                    bn=[(d[f"bn{i}_g"], d[f"bn{i}_b"]) for i in range(n)],
                    fc=(d["fc_w"], d["fc_b"]),
                    train_stats=BNStats([d[f"bn{i}_m"] for i in range(n)], [d[f"bn{i}_v"] for i in range(n)]),
-                   train_rms=d["train_rms"], meta=json.loads(str(d["meta"])))
+                   train_rms=d["train_rms"], meta=json.loads(str(d["meta"])),
+                   map=SignalMap(d["map_emb"], d["map_xy"], d["map_label"], d["map_mu"], d["map_sd"])
+                   if "map_xy" in d.files else None)
+
+
+@dataclass
+class SignalMap:
+    """A t-SNE map of training windows (their CNN embeddings, each placement with its own AdaBN).
+    t-SNE cannot place new points, so a live window goes where its nearest training windows are:
+    the distance-weighted mean of their map positions (k nearest, standardised embedding)."""
+    emb: np.ndarray             # (n, 64) reference embeddings, standardised
+    xy: np.ndarray              # (n, 2) their t-SNE positions, scaled to about -1..1
+    label: np.ndarray           # (n,) their gesture labels
+    mu: np.ndarray              # standardisation of embeddings
+    sd: np.ndarray
+    k: int = 10
+
+    def place(self, e: np.ndarray) -> np.ndarray:
+        """Embeddings (N, 64) -> map positions (N, 2)."""
+        z = (np.atleast_2d(e) - self.mu) / self.sd
+        d2 = ((z[:, None, :] - self.emb[None]) ** 2).sum(-1)
+        nn = np.argpartition(d2, self.k, axis=1)[:, :self.k]
+        w = 1.0 / (np.sqrt(np.take_along_axis(d2, nn, 1)) + 1e-6)
+        return (self.xy[nn] * w[..., None]).sum(1) / w.sum(1, keepdims=True)
 
 
 # ------------------------------------------------------------------ calibration of a band placement
@@ -156,6 +187,7 @@ class Decision:
     proba: np.ndarray           # smoothed class probabilities (classes order)
     raw: np.ndarray             # this window alone
     label: int                  # argmax of proba, as a gesture label
+    emb: np.ndarray | None = None   # this window's CNN embedding (64)
 
 
 class LiveDecoder:
@@ -165,8 +197,9 @@ class LiveDecoder:
     and the smoothing, as in training. While `collecting`, filtered windows are also kept for
     estimating a new Placement."""
 
-    def __init__(self, net: GestureNet, fs: float = FS) -> None:
+    def __init__(self, net: GestureNet, fs: float = FS, smooth: int = SMOOTH) -> None:
         self.net = net
+        self.smooth = smooth            # windows averaged; 5 = 0.4 s as in training
         self.sos = filter_sos(fs)
         self.placement = Placement.default(net)
         self.collecting = False
@@ -218,12 +251,13 @@ class LiveDecoder:
             self.collected.extend(W.copy())
         p = self.placement
         out = []
-        for e, lp in zip(ends, self.net.log_proba(W / p.rms[None, :, None], p.stats)):
-            self._hist = (self._hist + [lp])[-SMOOTH:]
+        E = self.net.embed(W / p.rms[None, :, None], p.stats)
+        for e, lp, em in zip(ends, self.net.head(E), E):
+            self._hist = (self._hist + [lp])[-self.smooth:]
             sm = np.mean(self._hist, axis=0)
             pr = np.exp(sm - sm.max())
             pr /= pr.sum()
-            out.append(Decision(float(t[e - base - 1]), pr, np.exp(lp), self.net.classes[int(pr.argmax())]))
+            out.append(Decision(float(t[e - base - 1]), pr, np.exp(lp), self.net.classes[int(pr.argmax())], em))
         return out
 
     # -------------------------------------------------------------- calibration
@@ -239,3 +273,31 @@ class LiveDecoder:
         self.placement = Placement.estimate(self.net, np.stack(wins))
         self._hist = []
         return self.placement
+
+
+class Stabilizer:
+    """What the screen shows: switches to a new gesture only after it has been the decision
+    `hold` times in a row with probability >= `min_prob`. Stops flicker between two close
+    classes at the cost of (hold - 1) x 100 ms more delay."""
+
+    def __init__(self, min_prob: float = 0.6, hold: int = 3) -> None:
+        self.min_prob, self.hold = min_prob, hold
+        self.shown: int | None = None
+        self._cand: int | None = None
+        self._n = 0
+
+    def reset(self) -> None:
+        self.shown, self._cand, self._n = None, None, 0
+
+    def update(self, d: Decision) -> int | None:
+        c, p = d.label, float(d.proba.max())
+        if c == self.shown:
+            self._cand, self._n = None, 0
+        elif p >= self.min_prob:
+            self._n = self._n + 1 if c == self._cand else 1
+            self._cand = c
+            if self._n >= self.hold or self.shown is None and self._n >= 1 and self.hold <= 1:
+                self.shown, self._cand, self._n = c, None, 0
+        else:
+            self._cand, self._n = None, 0
+        return self.shown

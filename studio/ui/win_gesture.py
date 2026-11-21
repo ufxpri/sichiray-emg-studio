@@ -12,13 +12,14 @@ import os
 import time
 
 import numpy as np
+import pyqtgraph as pg
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout,
                                QWidget)
 
 from .. import config
-from ..gesture.net import FS, GestureNet, LiveDecoder
+from ..gesture.net import FS, GestureNet, LiveDecoder, Stabilizer
 from .common import StudioWindow
 from .hand_pic import HandPicture
 from .theme import MUTED, PANEL, TEXT
@@ -27,6 +28,9 @@ MODEL_DIR = os.path.join(config.DATA_DIR, "models", "gesture")
 GESTURE_COLORS = ["#868e96", "#4dabf7", "#ff922b", "#20c997", "#fcc419", "#f783ac", "#51cf66", "#9775fa"]
 CALIB_REST_S, CALIB_HOLD_S, CALIB_GAP_S = 4.0, 3.0, 2.0
 UNSURE = 0.5            # below this top probability the decision is shown dimmed
+SMOOTHING = [("0.4초 (학습과 같음)", 5), ("0.6초", 7), ("0.8초", 9), ("1.0초", 11)]
+SWITCHING = [("3회 연속·60% 이상 (권장)", 0.6, 3), ("바로 (채터링 있음)", 0.0, 1), ("5회 연속·70% 이상", 0.7, 5)]
+TRAIL = 12              # past map positions drawn as a tail
 
 
 def colour(label: int) -> str:
@@ -75,6 +79,63 @@ class ProbBars(QWidget):
         q.end()
 
 
+class SignalMapView(pg.PlotWidget):
+    """The model's t-SNE map of training windows, with the live window as a moving dot."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setMouseEnabled(False, False)
+        self.hideButtons()
+        self.setAspectLocked(True)
+        for ax in ("left", "bottom"):
+            self.getAxis(ax).setStyle(showValues=False)
+            self.getAxis(ax).setTicks([[]])
+        self.ref = pg.ScatterPlotItem(size=4, pen=None)
+        self.addItem(self.ref)
+        self.tail = pg.PlotDataItem(pen=pg.mkPen(TEXT, width=1.5))
+        self.addItem(self.tail)
+        self.dot = pg.ScatterPlotItem(size=18, pen=pg.mkPen("#ffffff", width=2))
+        self.addItem(self.dot)
+        self.texts: list[pg.TextItem] = []
+        self.empty = pg.TextItem("", color=MUTED, anchor=(0.5, 0.5))
+        self.addItem(self.empty)
+        self.trail: list[np.ndarray] = []
+
+    def set_map(self, net: GestureNet | None) -> None:
+        for t in self.texts:
+            self.removeItem(t)
+        self.texts, self.trail = [], []
+        self.tail.setData([], [])
+        self.dot.setData([], [])
+        m = net.map if net else None
+        if m is None:
+            self.ref.setData([], [])
+            self.empty.setText("이 모델에는 지도가 없습니다 (다시 학습하면 생깁니다)" if net else "")
+            return
+        self.empty.setText("")
+        rgba = {int(c): QColor(colour(int(c))) for c in np.unique(m.label)}
+        brushes = [pg.mkBrush(rgba[int(c)].red(), rgba[int(c)].green(), rgba[int(c)].blue(), 70) for c in m.label]
+        self.ref.setData(m.xy[:, 0], m.xy[:, 1], brush=brushes)
+        names = net.meta["names"]
+        for c in np.unique(m.label):
+            xy = np.median(m.xy[m.label == c], 0)
+            t = pg.TextItem(names.get(str(int(c)), str(int(c))), color=TEXT, anchor=(0.5, 0.5))
+            f = QFont(self.font())
+            f.setBold(True)
+            t.setFont(f)
+            t.setPos(float(xy[0]), float(xy[1]))
+            self.addItem(t)
+            self.texts.append(t)
+        self.autoRange()
+
+    def push(self, xy: np.ndarray, label: int) -> None:
+        self.trail = (self.trail + [xy])[-TRAIL:]
+        tr = np.array(self.trail)
+        self.tail.setData(tr[:, 0], tr[:, 1])
+        cur = tr[-3:].mean(0)                           # a little smoothing of the dot itself
+        self.dot.setData([cur[0]], [cur[1]], brush=pg.mkBrush(colour(label)))
+
+
 class GestureWindow(StudioWindow):
     KEY = "gesture"
     TITLE = "실시간 손동작 판정"
@@ -92,6 +153,8 @@ class GestureWindow(StudioWindow):
         self.n_dec = 0
         self.t_rate = time.monotonic()
         self.rate = 0.0
+        self.stab = Stabilizer(*SWITCHING[0][1:])
+        self.shown: int | None = None
 
         # model row
         top = QHBoxLayout()
@@ -123,6 +186,26 @@ class GestureWindow(StudioWindow):
         self.cal_state = QLabel()
         cal.addWidget(self.cal_state)
 
+        # steadiness row
+        steady = QHBoxLayout()
+        steady.addWidget(QLabel("평활"))
+        self.smooth = QComboBox()
+        for text, n in SMOOTHING:
+            self.smooth.addItem(text, n)
+        self.smooth.currentIndexChanged.connect(self._steady)
+        steady.addWidget(self.smooth)
+        steady.addSpacing(16)
+        steady.addWidget(QLabel("화면 전환"))
+        self.switch = QComboBox()
+        for text, pmin, n in SWITCHING:
+            self.switch.addItem(text, (pmin, n))
+        self.switch.currentIndexChanged.connect(self._steady)
+        steady.addWidget(self.switch)
+        steady.addStretch(1)
+        hint = QLabel("판정이 떨리면 화면 전환 조건을 올리세요 (반응은 그만큼 늦어짐)")
+        hint.setStyleSheet(f"color: {MUTED};")
+        steady.addWidget(hint)
+
         # main view
         self.pic = HandPicture()
         self.pic.setMinimumSize(320, 300)
@@ -141,7 +224,7 @@ class GestureWindow(StudioWindow):
         left.addWidget(self.sub)
         self.bars = ProbBars()
         right = QVBoxLayout()
-        head = QLabel("동작별 확률 (최근 0.4초 평균)")
+        self.bars_head = head = QLabel("동작별 확률 (최근 0.4초 평균)")
         head.setStyleSheet(f"color: {MUTED};")
         right.addWidget(head)
         right.addWidget(self.bars)
@@ -151,18 +234,27 @@ class GestureWindow(StudioWindow):
         note.setWordWrap(True)
         note.setStyleSheet(f"color: {MUTED};")
         right.addWidget(note)
+        self.map = SignalMapView()
+        self.map.setMinimumSize(320, 300)
+        centre = QVBoxLayout()
+        mh = QLabel("신호 지도 (학습 창의 t-SNE, 흰 테두리 점 = 지금)")
+        mh.setStyleSheet(f"color: {MUTED};")
+        centre.addWidget(mh)
+        centre.addWidget(self.map, 1)
         mid = QHBoxLayout()
         mid.addLayout(left, 3)
-        mid.addLayout(right, 2)
+        mid.addLayout(centre, 4)
+        mid.addLayout(right, 3)
 
         root = QWidget()
         v = QVBoxLayout(root)
         v.addLayout(top)
         v.addWidget(self.model_info)
         v.addLayout(cal)
+        v.addLayout(steady)
         v.addLayout(mid, 1)
         self.setCentralWidget(root)
-        self.resize(820, 600)
+        self.resize(1240, 640)
         self._list()
 
     # ------------------------------------------------------------ model
@@ -199,9 +291,20 @@ class GestureWindow(StudioWindow):
             f"{', '.join(m.get('people', []))} · 정상 시도 {m.get('trials', '?')}개 · 착용 {len(m.get('wears', []))}개로 학습"
             + (f" · 새로 찼을 때 예상 정확도 {100 * ev:.0f}% (착용 하나 빼고 평가)" if ev else "")
             + f" · {m.get('created_local', '')}")
-        self.dec = LiveDecoder(self.net)
+        self.dec = LiveDecoder(self.net, smooth=self.smooth.currentData())
+        self.stab.reset()
+        self.shown = None
+        self.map.set_map(self.net)
         self.pos = self.hub.streams.t.total
         self._show_state()
+
+    def _steady(self) -> None:
+        pmin, n = self.switch.currentData()
+        self.stab = Stabilizer(pmin, n)
+        self.shown = None
+        if self.dec is not None:
+            self.dec.smooth = self.smooth.currentData()
+        self.bars_head.setText(f"동작별 확률 (최근 {(self.smooth.currentData() - 1) / 10:.1f}초 평균)")
 
     def _names(self) -> list[tuple[int, str]]:
         n = self.net.meta["names"]
@@ -289,6 +392,11 @@ class GestureWindow(StudioWindow):
                 self.cost_ms = 1000 * (time.perf_counter() - t0) / len(out)
                 self.n_dec += len(out)
                 self.last = out[-1]
+                for d in out:
+                    self.shown = self.stab.update(d)
+                if self.net.map is not None and self.calib is None:
+                    for xy in self.net.map.place(np.stack([d.emb for d in out])):
+                        self.map.push(xy, out[-1].label)
         now = time.monotonic()
         if now - self.t_rate > 1.0:
             self.rate, self.n_dec, self.t_rate = self.n_dec / (now - self.t_rate), 0, now
@@ -296,14 +404,16 @@ class GestureWindow(StudioWindow):
             self._calib_step()
         elif self.dec is not None and self.last is not None:
             d = self.last
-            names = self._names()
-            top = float(d.proba.max())
-            name = dict(names)[d.label]
-            self.pic.set_gesture(self._key(d.label), colour(d.label), dim=top < UNSURE)
-            self.big.setText(name if top >= UNSURE else f"{name}?")
-            self.big.setStyleSheet(f"color: {colour(d.label) if top >= UNSURE else MUTED};")
-            self.sub.setText(f"확률 {100 * top:.0f}%" + ("  ·  불확실" if top < UNSURE else ""))
-            self.bars.set(names, d.proba)
+            names = dict(self._names())
+            lab = d.label if self.shown is None else self.shown
+            pr = float(d.proba[self.net.classes.index(lab)])
+            sure = pr >= UNSURE
+            self.pic.set_gesture(self._key(lab), colour(lab), dim=not sure)
+            self.big.setText(names[lab] if sure else f"{names[lab]}?")
+            self.big.setStyleSheet(f"color: {colour(lab) if sure else MUTED};")
+            self.sub.setText(f"확률 {100 * pr:.0f}%" + ("  ·  불확실" if not sure else "")
+                             + (f"  ·  지금 창은 {names[d.label]} 쪽" if d.label != lab else ""))
+            self.bars.set(self._names(), d.proba)
         stale = self.last is not None and (s.t.total == 0 or time.perf_counter() - self.last.t > 1.0)
         parts = [self.mode_text()]
         if not ok_rate and self.hub.mode:
