@@ -80,6 +80,8 @@ class CameraLink:
         self._rx: list[float] = []
         self.faces: np.ndarray | None = None
         self.device = ""
+        self.has_model = True     # False: camera-only worker (--no-model), frames never carry hands
+        self.model_loading = False   # load_model() sent, waiting for model_loaded / model_failed
         self.on_frame: Callable[[HandFrame], None] | None = None   # recorder tap, called on the receive thread
         self._record_done: dict | None = None
         self._send_lock = threading.Lock()
@@ -97,7 +99,10 @@ class CameraLink:
         p = self._proc
         return p is not None and p.poll() is None
 
-    def start(self, camera: int = 0, width: int = 1280, height: int = 720, fps: int = 30, video: str = "") -> None:
+    def start(self, camera: int = 0, width: int = 1280, height: int = 720, fps: int = 30, video: str = "",
+              model: bool = True) -> None:
+        """model=False starts the worker without WiLoR: video streaming and recording only,
+        no joints. The joints are extracted later from video.avi with worker/hand_offline.py."""
         self.stop()
         ok, msg = self.available()
         if not ok:
@@ -110,12 +115,16 @@ class CameraLink:
                 "--models", config.HAND_MODELS, "--mano-out", config.MANO_NPZ]
         if video:
             args += ["--video", video]
+        if not model:
+            args.append("--no-model")
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         proc = subprocess.Popen(args, stdout=log, stderr=log, creationflags=flags)
         stop = threading.Event()
         with self._lock:
             self._proc, self._stop = proc, stop
             self._status, self._error, self._frame = "워커 시작 중", "", None
+            self.has_model = model
+            self.model_loading = False
         self._thread = threading.Thread(target=self._run, args=(proc, stop), daemon=True)
         self._thread.start()
 
@@ -176,6 +185,16 @@ class CameraLink:
         except OSError:
             return False
 
+    def load_model(self) -> bool:
+        """Ask a camera-only worker to load WiLoR now; video keeps streaming meanwhile."""
+        if not self.running or self.has_model or self.model_loading:
+            return False
+        ok = self.command({"type": "load_model"})
+        if ok:
+            with self._lock:
+                self.model_loading = True
+        return ok
+
     def start_video(self, folder: str) -> bool:
         with self._lock:
             self._record_done = None
@@ -235,7 +254,19 @@ class CameraLink:
                 return
             self.faces = np.array(head["faces"], np.int32)
             self.device = head.get("device", "")
+            self.has_model = bool(head.get("model", True))
             self._set(stop, f"실행 중 · {self.device} · 모델 로딩 {head.get('load_s')}s")
+        elif kind == "model_loaded":
+            with self._lock:
+                self.faces = np.array(head["faces"], np.int32)
+                self.device = head.get("device", "")
+                self.has_model = True
+                self.model_loading = False
+            self._set(stop, f"실행 중 · {self.device} · 모델 로딩 {head.get('load_s')}s")
+        elif kind == "model_failed":
+            with self._lock:
+                self.model_loading = False
+            self._set(stop, "실행 중 · 영상만", "모델 로딩 실패: " + head.get("text", ""))
         elif kind == "record_done":
             with self._lock:
                 self._record_done = head

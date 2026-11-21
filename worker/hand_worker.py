@@ -21,6 +21,9 @@ Must stay standalone: it runs in another interpreter and cannot import studio.
 Output: TCP, one client. Each message = u32 header length, u32 jpeg length,
 u32 blob length, header JSON, JPEG bytes, blob. The blob is float32 MANO vertices,
 778x3 per hand in header order. The first message is {"type": "hello", "faces": ...}.
+With --no-model nothing is loaded: the worker only captures, streams and records video
+(hands are always []), so a PC without a GPU can record sessions and the joints are
+extracted later with hand_offline.py from video.avi.
 Input: the studio may send u32 length + JSON commands on the same socket:
   {"type": "record", "path": "<dir>"}  write every captured frame to <dir>/video.avi
                                          (MJPG) and its perf_counter_ns to video_frames.npz
@@ -388,7 +391,52 @@ def send(conn: socket.socket, header: dict, jpeg: bytes = b"") -> None:
     conn.sendall(struct.pack("<III", len(h), len(jpeg), len(blob)) + h + jpeg + blob)
 
 
-def serve_commands(conn: socket.socket, cam: "Camera", send_lock: threading.Lock) -> None:
+class ModelSlot:
+    """The estimator the main loop uses; None until loaded. `load_async` fills it from a
+    background thread so a camera-only worker can turn hand tracking on while streaming."""
+
+    def __init__(self, est, args) -> None:
+        self.est = est
+        self.args = args
+        self.loading = False
+
+    def load_async(self, conn: socket.socket, send_lock: threading.Lock) -> None:
+        if self.est is not None or self.loading:
+            return
+        self.loading = True
+
+        def run() -> None:
+            a = self.args
+            try:
+                with send_lock:
+                    send(conn, {"type": "status", "text": "모델 로딩 중 (약 10초)…"})
+                t0 = time.time()
+                est = HandEstimator(a.dtype, a.conf, a.redetect, a.models, a.mano_out)
+                load_s = time.time() - t0
+                self.est = est
+                log(f"model loaded in {load_s:.1f}s")
+                with send_lock:
+                    send(conn, {"type": "model_loaded", "faces": est.faces(), "load_s": round(load_s, 1),
+                                "device": device_name(est)})
+            except Exception as e:
+                log("model load failed:", repr(e))
+                with send_lock:
+                    send(conn, {"type": "model_failed", "text": str(e)})
+            finally:
+                self.loading = False
+
+        threading.Thread(target=run, daemon=True).start()
+
+
+def device_name(est) -> str:
+    if est is None:
+        return "영상만 (손 인식 없음)"
+    if est.device.type == "cuda":
+        return est.torch.cuda.get_device_name(0)
+    return "CPU (GPU 없음, 느림)"
+
+
+def serve_commands(conn: socket.socket, cam: "Camera", send_lock: threading.Lock, slot: "ModelSlot") -> None:
     """Reads studio commands until the socket closes."""
     def recv(n: int) -> bytes:
         buf = bytearray()
@@ -409,6 +457,8 @@ def serve_commands(conn: socket.socket, cam: "Camera", send_lock: threading.Lock
                 with cam.lock:
                     cam.recorder = rec
                 log("recording to", cmd["path"])
+            elif cmd.get("type") == "load_model":
+                slot.load_async(conn, send_lock)
             elif cmd.get("type") == "record_stop":
                 with cam.lock:
                     rec, cam.recorder = cam.recorder, None
@@ -441,6 +491,8 @@ def main() -> None:
     ap.add_argument("--mano-out", default=os.path.join(HOME, "mano_right_np.npz"),
                     help="where to export MANO as plain arrays for the studio's numpy model")
     ap.add_argument("--bench", type=float, default=0, help="no server: run N seconds and print timings")
+    ap.add_argument("--no-model", action="store_true",
+                    help="camera only: stream and record video without loading WiLoR (joints come later from hand_offline.py)")
     args = ap.parse_args()
     # ultralytics touches a relative "runs/" path on every predict; relative to the
     # studio folder on Google Drive that raises WinError 433, so work from the local home
@@ -459,7 +511,7 @@ def main() -> None:
         send(conn, {"type": "status", "text": "모델 로딩 중 (약 10초)…"})
     try:
         t0 = time.time()
-        est = HandEstimator(args.dtype, args.conf, args.redetect, args.models, args.mano_out)
+        est = None if args.no_model else HandEstimator(args.dtype, args.conf, args.redetect, args.models, args.mano_out)
         load_s = time.time() - t0
         cam = Camera(args.camera, args.width, args.height, args.fps, args.video)
     except Exception as e:  # report to the studio instead of dying silently
@@ -467,13 +519,13 @@ def main() -> None:
         if srv:
             send(conn, {"type": "error", "text": str(e)})
         sys.exit(1)
-    log(f"model loaded in {load_s:.1f}s")
+    log("camera only, no model" if est is None else f"model loaded in {load_s:.1f}s")
     send_lock = threading.Lock()
+    slot = ModelSlot(est, args)
     if srv:
-        threading.Thread(target=serve_commands, args=(conn, cam, send_lock), daemon=True).start()
-        send(conn, {"type": "hello", "proto": PROTO, "faces": est.faces(), "load_s": round(load_s, 1),
-                    "camera": args.camera,
-                    "device": est.torch.cuda.get_device_name(0) if est.device.type == "cuda" else "CPU (GPU 없음, 느림)"})
+        threading.Thread(target=serve_commands, args=(conn, cam, send_lock, slot), daemon=True).start()
+        send(conn, {"type": "hello", "proto": PROTO, "faces": est.faces() if est else [], "model": est is not None,
+                    "load_s": round(load_s, 1), "camera": args.camera, "device": device_name(est)})
 
     seq, n, t_start = 0, 0, time.time()
     acc = {"detect": 0.0, "wilor": 0.0, "jpeg": 0.0}
@@ -482,13 +534,18 @@ def main() -> None:
         if frame is None:
             break
         t1 = time.perf_counter()
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        hands, how = est.detect(rgb)
-        t2 = time.perf_counter()
-        res = est.estimate(rgb, hands)
-        if not res and how == "track":   # lost while tracking: re-detect right away
-            est.since_detect = 10 ** 9
-        t3 = time.perf_counter()
+        est = slot.est
+        if est is None:
+            res, how = [], "none"
+            t2 = t3 = time.perf_counter()
+        else:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            hands, how = est.detect(rgb)
+            t2 = time.perf_counter()
+            res = est.estimate(rgb, hands)
+            if not res and how == "track":   # lost while tracking: re-detect right away
+                est.since_detect = 10 ** 9
+            t3 = time.perf_counter()
         jpeg = b""
         if srv:
             ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, args.jpeg])

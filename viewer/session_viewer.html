@@ -411,7 +411,10 @@ const gColor = l => C.g[l] || C.muted;
 function buildSession(o) {
   const S = { name: o.name, meta: o.meta || {}, demo: !!o.demo, warnings: o.warnings || [] };
   const m = S.meta;
-  S.names = Object.assign({}, NAMES0, m.label_names_ko || {});
+  // labels depend on meta.gesture_set ("basic" when missing); the meta maps are authoritative
+  S.names = Object.assign({}, NAMES0, m.label_names_shown || m.label_names_ko || {});
+  S.keys = Object.assign({}, KEYS0, m.labels || {});
+  S.ids = (m.gestures || []).length ? m.gestures.map(g => g.id) : [1, 2, 3, 4, 5, 6, 7, 8, 9];
   S.how = Object.assign({}, HOW0);
   for (const g of m.gestures || []) S.how[g.id] = g.how;
 
@@ -782,7 +785,7 @@ function updatePrompt() {
   card.style.setProperty("--gc", gColor(s.label));
   ph.className = "chip " + (s.kind === "rest" ? "" : s.kind);
   ph.textContent = PHASE_KO[s.kind] + (s.kind === "rest" ? " · 손 풀기" : "");
-  $("pName").innerHTML = `${esc(S.names[s.label])}<small>${esc(KEYS0[s.label] || "")} · ${s.label}</small>`;
+  $("pName").innerHTML = `${esc(S.names[s.label])}<small>${esc(S.keys[s.label] || "")} · ${s.label}</small>`;
   $("pHow").textContent = S.how[s.label] || "";
   $("pWhere").innerHTML = `세트 <b>${s.set + 1}</b>/${S.nSets || "?"} · 시행 <b>${s.trial + 1}</b>/${S.perSet || "?"}`;
   const a = segA(s), b = segB(s);
@@ -1096,7 +1099,7 @@ function renderInfo() {
       + (h === h ? `<i style="width:${(h / mxv * 100).toFixed(1)}%;background:${col};height:50%;top:25%"></i>` : "")
       + `</span><span>${(h === h ? h : a).toFixed(1)}</span></div>`;
   }).join("") : `<p class="legend">EMG 파일이 없습니다.</p>`;
-  $("gLegend").innerHTML = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(l => `<span style="--c:var(--g${l})">${esc(S.names[l])}</span>`).join("");
+  $("gLegend").innerHTML = S.ids.map(l => `<span style="--c:var(--g${l})">${esc(S.names[l])}</span>`).join("");
 }
 
 // ---------- navigation

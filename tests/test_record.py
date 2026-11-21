@@ -68,6 +68,8 @@ def test_session_writes_raw_emg_and_prompts(tmp_path):
     assert emg["emg"].shape[1] == 8 and len(emg["emg"]) == len(emg["t"]) == 10 * len(emg["frame_ts_ms"])
     assert len(emg["emg"]) > 300
     raw = open(os.path.join(folder, "emg_bytes.bin"), "rb").read()
+    hand = np.load(os.path.join(folder, "hand.npz"))
+    assert str(hand["source"]) == "live" and s["hand"]["source"] == "live"
     assert len(raw) == emg["chunk_len"].sum() == s["emg"]["bytes"]
     assert 400 < s["emg"]["fs_device_clock"] < 600
     pr = np.load(os.path.join(folder, "prompts.npz"))
@@ -76,3 +78,68 @@ def test_session_writes_raw_emg_and_prompts(tmp_path):
     assert meta["participant"] == "테스트 사람" and meta["status"] == "aborted"
     assert meta["t0_perf"] <= t0 and meta["labels"]["9"] == "wrist_ext"
     assert os.path.exists(os.path.join(folder, "hand.npz"))
+
+
+def test_session_without_hand_model_leaves_joints_to_offline(tmp_path):
+    link = Link()
+    cam = CameraLink()
+    cam.has_model = False          # camera-only worker: frames never carry hands
+    rec = SessionRecorder(link, cam, root=str(tmp_path))
+    link.open_demo("hex")
+    deadline = time.monotonic() + 5
+    while link.mode != "hex" and time.monotonic() < deadline:
+        time.sleep(0.05)
+    plan = Plan(reps=1, seed=2)
+    r = Runner(plan)
+    folder = rec.start("x", "", plan, want_video=False)
+    r.start_set(time.perf_counter())
+    time.sleep(0.3)
+    r.abort(time.perf_counter())
+    rec.stop()
+    link.close()
+    s = rec.finish(r, "aborted")
+    assert not os.path.exists(os.path.join(folder, "hand.npz"))   # hand_offline.py writes it later
+    assert s["hand"] == {"frames": 0, "with_right_hand": 0, "source": "none"}
+    meta = json.load(open(os.path.join(folder, "meta.json"), encoding="utf-8"))
+    assert meta["hand"]["source"] == "none"
+
+
+def test_plan_gesture_subset():
+    from studio.record.protocol import PRESETS
+    _label, gset, ids, _names = PRESETS["fist_numbers"]
+    p = Plan(sets=1, reps=1, seed=5, gestures=ids, gesture_set=gset)
+    assert p.trials_per_set == 6
+    (seq,) = p.order()
+    assert sorted(seq) == sorted(ids)
+    assert "gestures" in __import__("dataclasses").asdict(p)
+
+
+def test_gesture_sets_have_own_numbering_and_pictures():
+    from studio.record.protocol import GESTURE_SETS, PRESETS
+    from studio.ui.hand_pic import POSES
+    for gs in GESTURE_SETS.values():
+        assert 0 not in gs.ids and len(set(gs.ids)) == len(gs.ids)
+        assert all(k in POSES for k in gs.labels.values())
+    for _label, gset, ids, names in PRESETS.values():
+        assert set(ids) <= set(GESTURE_SETS[gset].ids) and set(names) <= set(ids)
+    puppet = GESTURE_SETS["puppet"]
+    assert puppet.ids == (1, 2, 3, 4, 5, 6, 7)        # its own numbering, not after the basic set
+    assert puppet.labels[6] == "radial_dev" and GESTURE_SETS["basic"].labels[6] == "three"
+
+
+def test_session_meta_records_the_gesture_set(tmp_path):
+    from studio.record.protocol import GESTURE_SETS
+    link = Link()
+    rec = SessionRecorder(link, CameraLink(), root=str(tmp_path))
+    plan = Plan(reps=1, seed=4, gesture_set="puppet", gestures=GESTURE_SETS["puppet"].ids)
+    r = Runner(plan)
+    assert sorted(r.order[0]) == list(range(1, 8))
+    folder = rec.start("p", "", plan, want_video=False, shown_names={2: "보"})
+    r.start_set(time.perf_counter())
+    r.abort(time.perf_counter())
+    rec.stop()
+    rec.finish(r, "aborted")
+    meta = json.load(open(os.path.join(folder, "meta.json"), encoding="utf-8"))
+    assert meta["gesture_set"] == "puppet" and meta["plan"]["gesture_set"] == "puppet"
+    assert meta["labels"]["4"] == "wrist_flex" and meta["label_names_ko"]["2"] == "손 펴기"
+    assert meta["label_names_shown"]["2"] == "보" and len(meta["gestures"]) == 7

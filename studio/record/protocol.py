@@ -11,24 +11,78 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 
-# label id 0 is rest; ids are stable across sessions, never renumber
-GESTURES = [
-    # id, key, name shown, how to do it
-    (1, "scissors", "가위", "검지·중지를 펴고 나머지는 접기"),
-    (2, "rock", "주먹", "다섯 손가락 모두 접기"),
-    (3, "paper", "보", "다섯 손가락 모두 펴기"),
-    (4, "one", "1", "검지만 펴기"),
-    (5, "two", "2", "검지·중지 펴기"),
-    (6, "three", "3", "검지·중지·약지 펴기"),
-    (7, "four", "4", "엄지만 접고 네 손가락 펴기"),
-    (8, "five", "5", "다섯 손가락 모두 펴기"),
-    (9, "wrist_ext", "손목 젖히기", "손바닥은 아래, 손등 쪽으로 손목을 끝까지 꺾기"),
-]
 REST_ID = 0
 PHASES = ("ready", "hold", "rest")
-LABELS = {0: "rest", **{g[0]: g[1] for g in GESTURES}}
-NAMES = {0: "휴식", **{g[0]: g[2] for g in GESTURES}}
-HINTS = {g[0]: g[3] for g in GESTURES}
+
+
+@dataclass(frozen=True)
+class GestureSet:
+    """One collection set with its own label numbering. Label 0 is always rest; within a
+    set ids are stable across sessions, never renumber. Sets do not share ids: label 2 in
+    "basic" and label 2 in "puppet" are different gestures (meta.json records the set)."""
+    key: str
+    title: str
+    gestures: tuple[tuple[int, str, str, str], ...]   # (id, key, name shown, how to do it)
+
+    @property
+    def ids(self) -> tuple[int, ...]:
+        return tuple(g[0] for g in self.gestures)
+
+    @property
+    def labels(self) -> dict[int, str]:
+        return {REST_ID: "rest", **{g[0]: g[1] for g in self.gestures}}
+
+    @property
+    def names(self) -> dict[int, str]:
+        return {REST_ID: "휴식", **{g[0]: g[2] for g in self.gestures}}
+
+    @property
+    def hints(self) -> dict[int, str]:
+        return {g[0]: g[3] for g in self.gestures}
+
+
+GESTURE_SETS = {s.key: s for s in (
+    GestureSet("basic", "기본 (가위바위보·숫자)", (
+        (1, "scissors", "가위", "검지·중지를 펴고 나머지는 접기"),
+        (2, "rock", "주먹", "다섯 손가락 모두 접기"),
+        (3, "paper", "보", "다섯 손가락 모두 펴기"),
+        (4, "one", "1", "검지만 펴기"),
+        (5, "two", "2", "검지·중지 펴기"),
+        (6, "three", "3", "검지·중지·약지 펴기"),
+        (7, "four", "4", "엄지만 접고 네 손가락 펴기"),
+        (8, "five", "5", "다섯 손가락 모두 펴기"),
+        (9, "wrist_ext", "손목 젖히기", "손바닥은 아래, 손등 쪽으로 손목을 끝까지 꺾기"),
+    )),
+    # EMG puppet concept: gestures whose main muscles are big, superficial and sit at the
+    # armband's height, each set lighting up a different combination. Wrist gestures keep
+    # the fingers relaxed and the elbow supported (no brachioradialis posture noise).
+    GestureSet("puppet", "인형극 (손 3 + 손목 4방향)", (
+        (1, "fist", "주먹", "다섯 손가락 모두 꽉 접기"),
+        (2, "open", "손 펴기", "다섯 손가락 모두 쫙 펴기"),
+        (3, "index", "검지 펴기", "검지만 펴고 나머지는 접기"),
+        (4, "wrist_flex", "손목 굽히기", "손바닥은 아래, 손가락 힘은 빼고 손바닥 쪽으로 손목을 꺾기"),
+        (5, "wrist_ext", "손목 젖히기", "손바닥은 아래, 손가락 힘은 빼고 손등 쪽으로 손목을 꺾기"),
+        (6, "radial_dev", "엄지 쪽 꺾기", "손바닥은 아래, 손가락 힘은 빼고 손목을 엄지 쪽(왼쪽)으로 꺾기"),
+        (7, "ulnar_dev", "새끼 쪽 꺾기", "손바닥은 아래, 손가락 힘은 빼고 손목을 새끼 쪽(오른쪽)으로 꺾기"),
+    )),
+)}
+
+# the basic set under its old names (sessions before gesture sets used these labels)
+BASIC = GESTURE_SETS["basic"]
+GESTURES = list(BASIC.gestures)
+LABELS = BASIC.labels
+NAMES = BASIC.names
+HINTS = BASIC.hints
+ALL_IDS = BASIC.ids
+
+# what the recorder offers: (label, gesture set, ids from that set, display-name overrides)
+PRESETS = {
+    "all": (f"기본 전체 {len(ALL_IDS)}동작", "basic", ALL_IDS, {}),
+    "fist_numbers": ("기본: 주먹(0) + 숫자 1~5", "basic", (2, 4, 5, 6, 7, 8), {2: "0"}),
+    "numbers": ("기본: 숫자 1~5", "basic", (4, 5, 6, 7, 8), {}),
+    "rps": ("기본: 가위·주먹·보", "basic", (1, 2, 3), {}),
+    "puppet": ("인형극: 주먹·손 펴기·검지 + 손목 4방향", "puppet", GESTURE_SETS["puppet"].ids, {}),
+}
 
 
 @dataclass(frozen=True)
@@ -39,6 +93,12 @@ class Plan:
     hold_s: float = 3.0
     rest_s: float = 2.0
     seed: int = 0
+    gestures: tuple[int, ...] = ALL_IDS   # ids from `gesture_set` used in this session
+    gesture_set: str = "basic"
+
+    @property
+    def gset(self) -> GestureSet:
+        return GESTURE_SETS[self.gesture_set]
 
     @property
     def trial_s(self) -> float:
@@ -46,7 +106,7 @@ class Plan:
 
     @property
     def trials_per_set(self) -> int:
-        return self.reps * len(GESTURES)
+        return self.reps * len(self.gestures)
 
     def order(self) -> list[list[int]]:
         """Gesture ids per set: each gesture `reps` times, shuffled, no immediate repeats."""
@@ -54,9 +114,9 @@ class Plan:
         out = []
         for _ in range(self.sets):
             while True:
-                seq = [g[0] for g in GESTURES for _ in range(self.reps)]
+                seq = [g for g in self.gestures for _ in range(self.reps)]
                 rng.shuffle(seq)
-                if all(a != b for a, b in zip(seq, seq[1:])):
+                if len(seq) < 2 or all(a != b for a, b in zip(seq, seq[1:])):
                     break
             out.append(seq)
         return out

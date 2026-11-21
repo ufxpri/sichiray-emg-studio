@@ -179,6 +179,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--demo", choices=["hex", "ascii"], help="start the synthetic device")
     ap.add_argument("--camera", type=int, help="start the hand worker on this camera index")
     ap.add_argument("--camera-video", default="", help="test: feed the hand worker from this video file")
+    ap.add_argument("--camera-only", action="store_true",
+                    help="start the camera without the hand model (video only; joints via worker/hand_offline.py)")
     ap.add_argument("--open", default="", help="windows to open: " + ",".join(WINDOWS) + " or all")
     ap.add_argument("--snapshot", help="save each window as PNG into this folder, then quit")
     ap.add_argument("--after", type=float, default=10.0, help="seconds before --snapshot")
@@ -196,7 +198,7 @@ def main(argv: list[str] | None = None) -> None:
     elif args.port:
         win.connect_to(args.port)
     if args.camera is not None:
-        hub.camera.start(args.camera, video=args.camera_video)
+        hub.camera.start(args.camera, video=args.camera_video, model=not args.camera_only)
     for k in (list(WINDOWS) if args.open == "all" else [k for k in args.open.split(",") if k]):
         win.open(k)
     if args.toggle_at is not None:

@@ -18,7 +18,7 @@ import numpy as np
 
 from .. import config
 from ..device.protocol import FRAME_MS, IMU_NAMES, SAMPLES_PER_FRAME
-from .protocol import GESTURES, LABELS, NAMES, Plan, Runner
+from .protocol import Plan, Runner
 
 FORMAT_VERSION = 1
 WEAR_RULES = "v1: right arm, pod 5 charging port toward the wrist, 3-4 fingers below the elbow crease, " \
@@ -92,7 +92,8 @@ class SessionRecorder:
                 self.hand.append(fr)
 
     # ------------------------------------------------------------ lifecycle (GUI thread)
-    def start(self, name: str, note: str, plan: Plan, want_video: bool) -> str:
+    def start(self, name: str, note: str, plan: Plan, want_video: bool,
+              shown_names: dict[int, str] | None = None) -> str:
         t0_perf, t0_unix = time.perf_counter(), time.time()
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(t0_unix))
         self.folder = os.path.join(self.root, f"{stamp}_{safe_name(name)}")
@@ -109,9 +110,12 @@ class SessionRecorder:
             "wear_rules": WEAR_RULES,
             "rotation_calibration": None,
             "plan": asdict(plan),
-            "labels": {str(k): v for k, v in LABELS.items()},
-            "label_names_ko": {str(k): v for k, v in NAMES.items()},
-            "gestures": [{"id": g[0], "key": g[1], "name": g[2], "how": g[3]} for g in GESTURES],
+            "gesture_set": plan.gesture_set,
+            "labels": {str(k): v for k, v in plan.gset.labels.items()},
+            "label_names_ko": {str(k): v for k, v in plan.gset.names.items()},
+            "label_names_shown": {str(k): v for k, v in {**plan.gset.names, **(shown_names or {})}.items()},
+            "gestures": [{"id": g[0], "key": g[1], "name": g[2], "how": g[3]} for g in plan.gset.gestures
+                         if g[0] in plan.gestures],
             "emg_source": self.link.source_name,
             "emg_mode_at_start": self.link.mode,
             "camera_device": self.camera.device,
@@ -179,7 +183,10 @@ class SessionRecorder:
         self.meta["emg"] = emg_info
         summary["emg"] = emg_info
 
-        # hand joints, right hand only (the band is on the right arm)
+        # hand joints, right hand only (the band is on the right arm). With a camera-only
+        # worker there are none: hand_offline.py writes hand.npz from video.avi later.
+        if not self.camera.has_model:
+            self.hand = []
         H = len(self.hand)
         nan = lambda *shape: np.full((H, *shape), np.nan, np.float32)
         kp2d, kp3d, orient, pose, betas = nan(21, 2), nan(21, 3), nan(3), nan(15, 3), nan(10)
@@ -189,14 +196,17 @@ class SessionRecorder:
             if h is not None:
                 kp2d[i], kp3d[i], orient[i], pose[i], betas[i] = h.kp2d, h.kp3d, h.global_orient, h.hand_pose, h.betas
                 conf[i], bbox[i] = h.det_conf, h.bbox
-        np.savez(os.path.join(d, "hand.npz"),
-                 t=np.array([fr.t_capture for fr in self.hand]),
-                 has_right=np.array([fr.right_hand() is not None for fr in self.hand]),
-                 n_hands=np.array([len(fr.hands) for fr in self.hand], np.int8),
-                 kp2d=kp2d, kp3d=kp3d, global_orient=orient, hand_pose=pose, betas=betas,
-                 det_conf=conf, bbox=bbox, how=np.array([fr.how for fr in self.hand]),
-                 image_size=np.array([[fr.width, fr.height] for fr in self.hand], np.int32).reshape(-1, 2))
-        self.meta["hand"] = {"frames": H, "with_right_hand": int(sum(fr.right_hand() is not None for fr in self.hand))}
+        if self.camera.has_model:
+            np.savez(os.path.join(d, "hand.npz"),
+                     t=np.array([fr.t_capture for fr in self.hand]),
+                     has_right=np.array([fr.right_hand() is not None for fr in self.hand]),
+                     n_hands=np.array([len(fr.hands) for fr in self.hand], np.int8),
+                     kp2d=kp2d, kp3d=kp3d, global_orient=orient, hand_pose=pose, betas=betas,
+                     det_conf=conf, bbox=bbox, how=np.array([fr.how for fr in self.hand]),
+                     image_size=np.array([[fr.width, fr.height] for fr in self.hand], np.int32).reshape(-1, 2),
+                     source=np.array("live"))
+        self.meta["hand"] = {"frames": H, "with_right_hand": int(sum(fr.right_hand() is not None for fr in self.hand)),
+                             "source": "live" if self.camera.has_model else "none"}
         summary["hand"] = self.meta["hand"]
 
         # video: written by the worker; frame times are perf_counter_ns there
@@ -235,10 +245,14 @@ the EMG link and the camera worker; `meta.json` maps it to wall time (`t0_perf` 
 | `emg_bytes.bin` | every byte received from the armband, unparsed |
 | `video.avi` | every camera frame (MJPG). The fps in its header is nominal; use `video_frames.npz` for frame times |
 | `video_frames.npz` | `t_ns` perf_counter **nanoseconds** of each video frame, `cam_seq` camera frame counter (gaps = frames the camera produced but were not written) |
-| `hand.npz` | WiLoR right-hand estimate per processed frame (fewer than video frames): `t`, `has_right`, `kp2d` (pixels), `kp3d` (m), `global_orient`, `hand_pose` (MANO axis-angle), `betas`, `det_conf`, `bbox`; NaN where no right hand |
+| `hand.npz` | WiLoR right-hand estimate per processed frame: `t`, `has_right`, `kp2d` (pixels), `kp3d` (m), `global_orient`, `hand_pose` (MANO axis-angle), `betas`, `det_conf`, `bbox`; NaN where no right hand. Written live (fewer frames than the video, `meta.json` hand.source = "live") or afterwards from `video.avi` by `worker/hand_offline.py` (every frame, `source` = "offline", plus `video_frame_index`). Missing = recorded camera-only and not yet extracted |
 | `prompts.npz` | what the screen asked for: `t` shown, `t_plan` scheduled, `kind` (set_start / ready / hold / rest / set_end / abort), `set`, `trial`, `label`; `order` the gesture order per set |
 
-Labels (`label`): 0 rest, 1 scissors, 2 rock, 3 paper, 4..8 the numbers 1..5, 9 wrist extension.
+Labels (`label`) depend on the gesture set, `meta.json` `gesture_set`; `labels` maps each id to
+its key, `gestures` says how each was done. 0 is always rest.
+- `basic` (also sessions without `gesture_set`): 1 scissors, 2 rock, 3 paper, 4..8 the numbers 1..5, 9 wrist extension.
+- `puppet`: 1 fist, 2 open hand, 3 index point, 4 wrist flexion, 5 wrist extension,
+  6 radial deviation (thumb side), 7 ulnar deviation (little-finger side).
 Prompt times say when a gesture was **asked for**; the actual movement starts a reaction time
 later. A trial is ready (gesture announced) -> hold (do it) -> rest.
 

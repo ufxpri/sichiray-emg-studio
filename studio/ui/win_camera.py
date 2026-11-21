@@ -82,8 +82,14 @@ class CameraWindow(StudioWindow):
         self.res.addItems([f"{w}×{h}" for w, h in RESOLUTIONS])
         bar.addWidget(self.res)
         self.btn = QPushButton("시작")
+        self.btn.setToolTip("카메라만 켭니다 (영상 보기·녹화). 손 인식은 오른쪽 버튼으로 따로 싣습니다.")
         self.btn.clicked.connect(self._toggle)
         bar.addWidget(self.btn)
+        self.model_btn = QPushButton("손 인식 모델 로드")
+        self.model_btn.setToolTip("실행 중인 카메라에 WiLoR 모델을 싣습니다 (GPU 권장, 약 10초). 영상은 그대로 계속됩니다. "
+                                  "싣지 않으면 손 관절은 나중에 worker/hand_offline.py로 영상에서 뽑습니다.")
+        self.model_btn.clicked.connect(self.cam.load_model)
+        bar.addWidget(self.model_btn)
         bar.addSpacing(12)
         right = QLabel("오른손만 인식")
         right.setStyleSheet(f"color: {MUTED};")
@@ -115,7 +121,7 @@ class CameraWindow(StudioWindow):
             self.view.img = None
         else:
             w, h = RESOLUTIONS[self.res.currentIndex()]
-            self.cam.start(self.index.value(), w, h)
+            self.cam.start(self.index.value(), w, h, model=False)
 
     def refresh(self) -> None:
         cam = self.cam
@@ -123,6 +129,13 @@ class CameraWindow(StudioWindow):
         self.btn.setText("정지" if running else "시작")
         self.index.setEnabled(not running)
         self.res.setEnabled(not running)
+        if running and cam.model_loading:
+            self.model_btn.setText("모델 로딩 중…")
+        elif running and cam.has_model:
+            self.model_btn.setText("손 인식 켜짐")
+        else:
+            self.model_btn.setText("손 인식 모델 로드")
+        self.model_btn.setEnabled(running and not cam.has_model and not cam.model_loading)
         self.view.mirror = self.mirror.isChecked()
         self.view.show_bones = self.bones.isChecked()
         self.view.show_box = self.box.isChecked()
@@ -136,7 +149,10 @@ class CameraWindow(StudioWindow):
         status = cam.error or cam.status
         self.view.message = status
         self.view.update()
-        if frame and running:
+        if frame and running and not cam.has_model:
+            self.stats.setText(f"카메라 {frame.cam_fps:.0f} fps · 영상만 (손 인식 꺼짐) · "
+                               f"촬영→화면 지연 {frame.lag_ms:.0f} ms · 관절은 녹화 후 hand_offline.py로 추출")
+        elif frame and running:
             ms = frame.ms
             self.stats.setText(
                 f"카메라 {frame.cam_fps:.0f} fps · 추론 {cam.rx_fps():.0f} fps · 검출 {ms['detect']:.0f} ms "
