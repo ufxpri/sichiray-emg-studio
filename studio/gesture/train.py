@@ -2,7 +2,7 @@
 
 Needs PyTorch (here: Python 3.13); the studio itself only loads the saved arrays.
 
-    python -m studio.gesture.train --who 조승준 [--eval]
+    python -m studio.gesture.train --who 홍길동 [--eval]
     python -m studio.gesture.train --who all --out data/models/gesture/all.npz
 
 Trials: those studio.record.dataset keeps (quality check passed, not re-recorded by a makeup).

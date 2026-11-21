@@ -137,11 +137,11 @@ python -m pytest tests
 
 ```bash
 # 학습: 사람 이름 또는 all. --eval 은 착용 하나씩 빼고 평가해 "새로 찼을 때" 정확도를 모델에 기록
-py -3.13 -m studio.gesture.train --who 조승준 --eval          # -> data/models/gesture/조승준.npz
+py -3.13 -m studio.gesture.train --who 홍길동 --eval          # -> data/models/gesture/홍길동.npz
 
 # 밴드 없이 시험: 녹화 세션을 실시간처럼 흘려 판정 (공정하게 보려면 그 착용을 --exclude 로 빼고 학습한 모델로)
-py -3.13 -m studio.gesture.train --who 조승준 --exclude 111826 --out data/models/gesture/test.npz
-py -3.12 -m studio.gesture.replay data/sessions/20261121-111826_조승준 --model data/models/gesture/test.npz
+py -3.13 -m studio.gesture.train --who 홍길동 --exclude 111826 --out data/models/gesture/test.npz
+py -3.12 -m studio.gesture.replay data/sessions/20261121-111826_홍길동 --model data/models/gesture/test.npz
 ```
 
 창에서 모델을 고르고 **[착용 보정 시작]**을 누른 뒤 약 40초 동안 그림대로 쉬기와 동작을 합니다. 정답 없이 이 신호로
