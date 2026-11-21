@@ -40,10 +40,11 @@ EPOCHS, BATCH = 30, 128
 
 
 # ------------------------------------------------------------------ data
-def load_windows(root: str, who: str, gesture_set: str = "puppet", exclude: tuple[str, ...] = ()):
+def load_windows(root: str, who: str, gesture_set: str = "puppet", exclude: tuple[str, ...] = (),
+                 gestures: tuple[int, ...] = ()):
     trials, *_rest, meta = ds.collect(root, gesture_set)
     kept = [k for k in trials if k.kept and (who == "all" or k.participant == who)
-            and not any(e in k.wear for e in exclude)]
+            and not any(e in k.wear for e in exclude) and (not gestures or k.label in gestures)]
     if not kept:
         raise SystemExit(f"'{who}'의 정상 시도가 없습니다")
     sos = gn.filter_sos()
@@ -71,6 +72,7 @@ def load_windows(root: str, who: str, gesture_set: str = "puppet", exclude: tupl
     info = {"labels": {int(a): b for a, b in any_meta["labels"].items()},
             "names": {int(a): b for a, b in any_meta["label_names_ko"].items()},
             "people": sorted({k.participant for k in kept}), "wears": sorted({k.wear for k in kept}),
+            "wear_person": {k.wear: k.participant for k in kept},
             "trials": len(kept), "gesture_set": gesture_set}
     return (np.stack(X), np.array(Y), np.array(U), np.array(TR), np.array(TT)), info
 
@@ -219,7 +221,11 @@ def main(argv=None) -> None:
     ap.add_argument("--root", default=os.path.join(config.DATA_DIR, "sessions"))
     ap.add_argument("--out", help="model file (default data/models/gesture/<who>.npz)")
     ap.add_argument("--set", default="puppet")
-    ap.add_argument("--eval", action="store_true", help="also score leaving one wear out")
+    ap.add_argument("--eval", action="store_true", help="also score leaving one wear (or person) out")
+    ap.add_argument("--eval-by", choices=["wear", "person"], default="wear",
+                    help="what to leave out: a band placement (putting it on again) or a whole person (new user)")
+    ap.add_argument("--gestures", type=int, nargs="*", default=[],
+                    help="only these gesture labels (rest is always included), e.g. 2 4 5 6 7 8")
     ap.add_argument("--threads", type=int, default=8)
     ap.add_argument("--exclude", nargs="*", default=[],
                     help="leave out these wears (full-session names or parts, e.g. 111826), to test on them")
@@ -227,7 +233,7 @@ def main(argv=None) -> None:
     torch.set_num_threads(a.threads)
     out = a.out or os.path.join(config.DATA_DIR, "models", "gesture", f"{a.who}.npz")
     t0 = time.time()
-    (X, Y, U, TR, TT), info = load_windows(a.root, a.who, a.set, tuple(a.exclude))
+    (X, Y, U, TR, TT), info = load_windows(a.root, a.who, a.set, tuple(a.exclude), tuple(a.gestures))
     classes = np.array(sorted(np.unique(Y)))
     print(f"{a.who}: 시도 {info['trials']}개, 착용 {len(info['wears'])}개, 창 {len(X):,}개")
     Xn, rms = normalise(X, U)
@@ -235,25 +241,37 @@ def main(argv=None) -> None:
 
     report = {}
     if a.eval:
-        if len(info["wears"]) < 2:
-            print("착용이 하나뿐이라 착용 교차 평가를 건너뜁니다")
+        by_person = a.eval_by == "person"
+        groups = info["people"] if by_person else info["wears"]
+        if len(groups) < 2:
+            print(f"{'사람' if by_person else '착용'}이 하나뿐이라 교차 평가를 건너뜁니다")
         else:
-            print("착용 하나씩 빼고 평가 (새로 찼을 때를 흉내):")
+            print("사람 하나씩 빼고 평가 (처음 보는 사람):" if by_person else
+                  "착용 하나씩 빼고 평가 (새로 찼을 때를 흉내):")
+            P = np.array([info["wear_person"][u] for u in U])
             scores = []
-            for w in info["wears"]:
-                te = U == w
+            for grp in groups:
+                te = (P == grp) if by_person else (U == grp)
                 net, _ = fit(Xn[~te], Y[~te], U[~te], classes, seed=1)
-                g = export(net, {k: v for k, v in rms.items() if k != w}, {"classes": classes.tolist()})
-                place = gn.Placement.estimate(g, X[te])                   # calibration: no labels
-                acc, rec = smoothed_accuracy(g, place, X[te], Y[te], TR[te], TT[te])
-                acc0, _ = smoothed_accuracy(g, gn.Placement.default(g), X[te], Y[te], TR[te], TT[te])
+                g = export(net, {k: v for k, v in rms.items() if k not in set(U[te])}, {"classes": classes.tolist()})
+                accs, accs0, recs = [], [], defaultdict(list)
+                for u in np.unique(U[te]):                                    # calibrate each placement, no labels
+                    m = te & (U == u)
+                    acc, rec = smoothed_accuracy(g, gn.Placement.estimate(g, X[m]), X[m], Y[m], TR[m], TT[m])
+                    acc0, _ = smoothed_accuracy(g, gn.Placement.default(g), X[m], Y[m], TR[m], TT[m])
+                    accs.append(acc); accs0.append(acc0)
+                    for c, v in rec.items():
+                        recs[c].append(v)
+                acc, acc0 = float(np.mean(accs)), float(np.mean(accs0))
+                rec = {c: float(np.mean(v)) for c, v in recs.items()}
                 scores.append(acc)
-                report[w] = {"balanced_acc": round(acc, 3), "without_calibration": round(acc0, 3),
-                             "recall": {names[c]: round(v, 2) for c, v in rec.items()}}
-                print(f"  {w}: {acc:.3f} (보정 없이 {acc0:.3f})  " +
-                      ", ".join(f"{names[c]} {v:.2f}" for c, v in rec.items()))
+                report[grp] = {"balanced_acc": round(acc, 3), "without_calibration": round(acc0, 3),
+                               "recall": {names[c]: round(v, 2) for c, v in rec.items()}}
+                print(f"  {grp}: {acc:.3f} (보정 없이 {acc0:.3f})  " +
+                      ", ".join(f"{names[c]} {v:.2f}" for c, v in sorted(rec.items())))
             report["mean"] = round(float(np.mean(scores)), 3)
-            print(f"  평균 {np.mean(scores):.3f}")
+            report["by"] = a.eval_by
+            print(f"  평균 {np.mean(scores):.3f}  (우연 수준 {1 / len(classes):.3f})")
 
     net, sig = fit(Xn, Y, U, classes, seed=0, log=print)
     meta = {"classes": classes.tolist(), "labels": {int(c): info["labels"][int(c)] for c in classes},

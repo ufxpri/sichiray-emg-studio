@@ -22,6 +22,7 @@ import csv
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -33,8 +34,8 @@ import numpy as np
 from . import quality as q
 
 
-DATA, SIGNAL, GOOD = "데이터누락", "신호이상", "정상"
-CATEGORIES = (GOOD, DATA, SIGNAL)
+DATA, SIGNAL, GOOD, UNJUDGED = "데이터누락", "신호이상", "정상", "판정불가"
+CATEGORIES = (GOOD, DATA, SIGNAL, UNJUDGED)
 
 
 @dataclass
@@ -59,9 +60,13 @@ class Trial:
         """데이터누락: EMG missing in the hold (dropout) or too little left to judge.
         신호이상: EMG complete but the signal does not match its gesture (wrong posture, another
         gesture, no effort, or a makeup recorded after the band was moved).
-        정상: neither."""
+        판정불가: EMG complete, but no other normal trial of the same gesture in the placement to
+        compare with (sessions with two repetitions per gesture), so the signal is unverified.
+        정상: none of these."""
         if any("누락" in r or "너무 짧음" in r for r in self.reasons):
             return DATA
+        if self.reasons and all(r == q.NO_REFERENCE for r in self.reasons):
+            return UNJUDGED
         return SIGNAL if self.reasons else GOOD
 
     @property
@@ -72,6 +77,12 @@ class Trial:
 
 def _meta(folder: str) -> dict:
     return json.load(open(os.path.join(folder, "meta.json"), encoding="utf-8"))
+
+
+def wear_key(session: str) -> str:
+    """The band placement a full session belongs to. Old recordings were split into one folder
+    per set (<name>_set1, <name>_set2) without taking the band off: same placement."""
+    return re.sub(r"_set\d+$", "", session)
 
 
 def collect(root: str, gesture_set: str = "puppet"):
@@ -95,14 +106,34 @@ def collect(root: str, gesture_set: str = "puppet"):
     trials: list[Trial] = []
     notes: list[tuple[str, str]] = []
     recorded = defaultdict(int)
-    for b in [n for n in names if not meta[n].get("makeup_of")]:
+    bases = [n for n in names if not meta[n].get("makeup_of")]
+    checked: dict[str, q.SessionCheck] = {}
+
+    def check(b: str) -> q.SessionCheck:
+        """Full sessions of one placement are checked together."""
+        if b not in checked:
+            group = [n for n in bases if wear_key(n) == wear_key(b) and n in complete]
+            for sc in q.check_sessions([os.path.join(root, n) for n in group]):
+                checked[os.path.basename(sc.folder)] = sc
+        return checked[b]
+
+    complete = set()
+    for b in bases:
         m = meta[b]
         plan = m.get("plan", {})
-        if m["prompts"]["trials_done"] < plan.get("reps", 1) * len(plan.get("gestures", [])):
+        planned = plan.get("gestures") or [k for k in m.get("labels", {}) if int(k)]
+        if m["prompts"]["trials_done"] >= plan.get("reps", 1) * len(planned):
+            complete.add(b)
+    for b in bases:
+        m = meta[b]
+        plan = m.get("plan", {})
+        # old sessions have no gesture list in the plan: every label of their set was asked
+        planned = plan.get("gestures") or [k for k in m.get("labels", {}) if int(k)]
+        if m["prompts"]["trials_done"] < plan.get("reps", 1) * len(planned):
             notes.append((b, f"제외: 1세트를 끝내지 못한 세션 ({m['prompts']['trials_done']}회)"))
             continue
         who = m.get("participant", "")
-        sc = q.check_session(os.path.join(root, b))
+        sc = check(b)
         groups = [(b, "base", sc.trials)]
         for n in sorted(x for x in names if x != b and base_of(x) == b):
             mc = q.check_makeup(sc, os.path.join(root, n), replaced[b])
@@ -112,7 +143,7 @@ def collect(root: str, gesture_set: str = "puppet"):
         for n, src, checks in groups:
             for c in checks:
                 recorded[(who, c.label)] += 1
-                trials.append(Trial(who, b, n, src, c.set, c.trial, c.rep, c.label, c.own, c.coverage,
+                trials.append(Trial(who, wear_key(b), n, src, c.set, c.trial, c.rep, c.label, c.own, c.coverage,
                                     c.max_gap_s, bool(c.doubts), tuple(c.reasons),
                                     (c.set, c.trial) in replaced[n]))
     return trials, notes, recorded, meta
@@ -287,7 +318,7 @@ def split(root: str, out: str, gesture_set: str = "puppet") -> dict:
 SPLIT_README = """# EMG 시도별 품질 분류 (시도 하나 = 파일 하나)
 
 `python -m studio.record.dataset --split` 으로 만든 폴더입니다. 녹화된 시도 {n}개를 하나씩
-CSV 파일로 나누고, 사람마다 **정상 / 데이터누락 / 신호이상** 세 폴더로 분류했습니다.
+CSV 파일로 나누고, 사람마다 **정상 / 데이터누락 / 신호이상 / 판정불가** 폴더로 분류했습니다.
 녹화를 더 하면 같은 명령으로 다시 만들면 됩니다 (판정은 매번 처음부터 다시 계산).
 
 ## 폴더와 파일
@@ -363,6 +394,17 @@ CSV 파일로 나누고, 사람마다 **정상 / 데이터누락 / 신호이상*
 
 밴드를 다시 차면 같은 사람·같은 동작도 신호가 크게 달라져서(세션 간 정확도 0.4~0.8) 원본과 섞어 쓸 수 없기 때문입니다.
 이 시도들은 신호 자체는 멀쩡할 수 있으니, 필요하면 `reason` 으로 골라 따로 쓰세요.
+
+### 판정불가
+
+신호는 끊김 없이 다 들어왔지만, 같은 착용 안에 **같은 동작의 다른 정상 시도가 없어서** 2단계 비교를 할 수 없었던 시도입니다.
+동작당 2회만 녹화한 세션에서 한 시도가 이상하면 남은 하나가 여기로 옵니다. 신호가 이상하다는 뜻이 아니라 확인하지 못했다는 뜻이라
+신호이상과 따로 두었고, 확인되지 않았으므로 학습용 데이터셋에는 넣지 않았습니다. 영상으로 확인하면 살릴 수 있습니다.
+
+### 같은 착용의 폴더는 함께 판정
+
+예전 녹화처럼 한 번 찬 상태로 녹화한 것을 세트별 폴더(`..._set1`, `..._set2`)로 나눈 경우, 두 폴더를 한 착용으로 묶어
+함께 판정합니다. 비교할 시도가 두 배가 되어 판정이 더 정확해지고, 학습할 때도 같은 착용으로 다룹니다.
 
 ### 둘 다 해당하면
 

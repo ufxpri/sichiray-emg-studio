@@ -233,7 +233,7 @@ def test_split_writes_one_file_per_trial_by_category(tmp_path):
                 label_names_ko={str(k): v for k, v in gs.names.items()})
     json.dump(meta, open(base / "meta.json", "w", encoding="utf-8"))
     info = split(str(tmp_path / "s"), str(tmp_path / "out"))
-    assert info["files"] == {"정상": 10, "데이터누락": 1, "신호이상": 1}
+    assert info["files"] == {"정상": 10, "데이터누락": 1, "신호이상": 1, "판정불가": 0}
     out = tmp_path / "out" / "x"
     assert len(list((out / "데이터누락").iterdir())) == 1 and len(list((out / "정상").iterdir())) == 10
     (f,) = (out / "신호이상").iterdir()

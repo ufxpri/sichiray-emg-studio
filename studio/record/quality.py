@@ -30,6 +30,7 @@ MAX_GAP_S = 0.2             # longest tolerated hole inside the hold
 MIN_OWN = 0.3               # below this fraction of windows classified as its own gesture: re-record
 DOUBT_OWN = 0.5             # below this: borderline, shown but not selected by default
 MIN_WINDOWS = 10            # below this many windows the signal check is not possible
+NO_REFERENCE = "같은 동작의 다른 정상 시도가 없어 신호 비교 불가"
 
 
 @dataclass
@@ -151,7 +152,18 @@ def _segments(folder: str):
 
 
 def check_session(folder: str) -> SessionCheck:
-    meta, names, checks, hold_rows, rest_X = _segments(folder)
+    return check_sessions([folder])[0]
+
+
+def check_sessions(folders: list[str]) -> list[SessionCheck]:
+    """Check several folders recorded in one band placement together (e.g. an old recording
+    split into one folder per set), so each trial is compared with all the others."""
+    parts = [_segments(f) for f in folders]
+    names = parts[0][1]
+    checks = [c for _, _, cs, _, _ in parts for c in cs]
+    hold_rows = [h for _, _, _, hs, _ in parts for h in hs]
+    rests = [r for *_, r in parts if len(r)]
+    rest_X = np.vstack(rests) if rests else np.zeros((0, 16))
     notes = []
 
     # --- signal: leave-one-trial-out LDA over gesture trials + rest. Two passes: trials that
@@ -169,7 +181,7 @@ def check_session(folder: str) -> SessionCheck:
             c = checks[k]
             train = [j for j in clean if j != k]
             if c.label not in {checks[j].label for j in train}:
-                c.reasons.append("같은 동작의 다른 정상 시도가 없어 신호 비교 불가")
+                c.reasons.append(NO_REFERENCE)
                 continue
             X = np.vstack([hold_rows[j] for j in train] + [rest_X])
             y = np.concatenate([np.full(len(hold_rows[j]), checks[j].label) for j in train]
@@ -191,8 +203,15 @@ def check_session(folder: str) -> SessionCheck:
             c.reasons.append("유효 신호 구간이 너무 짧음")
     if len(rest_X) == 0:
         notes.append("휴식 구간 신호가 없어 '동작 안 함' 판정은 빠졌습니다")
-    return SessionCheck(folder, meta, checks, names, correct / total if total else float("nan"), notes,
-                        hold_rows, rest_X)
+    if len(folders) > 1:
+        notes.append(f"같은 착용의 폴더 {len(folders)}개를 함께 판정했습니다")
+    cv = correct / total if total else float("nan")
+    out, i = [], 0
+    for f, (meta, nm, cs, hs, rx) in zip(folders, parts):
+        out.append(SessionCheck(f, meta, checks[i:i + len(cs)], nm, cv, list(notes), hold_rows[i:i + len(cs)],
+                                rest_X if len(folders) > 1 else rx))
+        i += len(cs)
+    return out
 
 
 @dataclass
