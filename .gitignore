@@ -1,5 +1,9 @@
 # runtime data (settings, pose recordings, models) - not source
-data/
+data/*
+# trained gesture models are shared (data/models/gesture/*.npz)
+!data/models/
+data/models/*
+!data/models/gesture/
 # internal report and screenshots (shared separately)
 docs/
 __pycache__/
