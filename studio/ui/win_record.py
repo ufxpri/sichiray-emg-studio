@@ -6,19 +6,23 @@ everything else refreshes with the hub.
 """
 from __future__ import annotations
 
+import os
 import time
 
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont, QImage, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+                               QLineEdit, QMessageBox,
                                QDoubleSpinBox, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QStackedWidget,
                                QVBoxLayout, QWidget)
 
-from ..record.protocol import NAMES, PRESETS, Plan, Runner
+from ..record.protocol import GESTURE_SETS, NAMES, PRESETS, Plan, Runner
+from ..record.quality import check_session
 from .common import StudioWindow
 from .hand_pic import HandPicture
+from .makeup_dialog import MakeupDialog
 from ..device.protocol import CH
 from .theme import CH_COLORS, MUTED, TEXT
 
@@ -114,6 +118,7 @@ class RecordWindow(StudioWindow):
         self.names = dict(NAMES)     # on-screen names, preset may override (e.g. fist shown as "0")
         self.hints: dict[int, str] = {}
         self.keys: dict[int, str] = {}
+        self.makeup: dict | None = None     # {"folder", "meta", "trials": [TrialCheck]} when re-recording
         self.runner: Runner | None = None
         self.pages = QStackedWidget()
         self.pages.addWidget(self._setup_page())
@@ -158,6 +163,19 @@ class RecordWindow(StudioWindow):
         self.sets_box.valueChanged.connect(self._plan_changed)
         proto.addWidget(self.sets_box)
         form.addRow("동작 묶음", proto)
+        mk = QHBoxLayout()
+        self.makeup_btn = QPushButton("이전 세션 보충 녹화…")
+        self.makeup_btn.setToolTip("녹화한 세션을 신호 분석해서 EMG가 누락됐거나 동작이 틀려 보이는 시도만 다시 녹화합니다.")
+        self.makeup_btn.clicked.connect(self._pick_makeup)
+        mk.addWidget(self.makeup_btn)
+        self.makeup_lbl = QLabel()
+        self.makeup_lbl.setStyleSheet("color: #ffd43b;")
+        mk.addWidget(self.makeup_lbl, 1)
+        self.makeup_clear = QPushButton("보충 취소")
+        self.makeup_clear.clicked.connect(lambda: self._set_makeup(None))
+        self.makeup_clear.setVisible(False)
+        mk.addWidget(self.makeup_clear)
+        form.addRow("보충", mk)
         self.gallery = QHBoxLayout()
         self.gallery.setSpacing(6)
         gal = QWidget()
@@ -243,9 +261,20 @@ class RecordWindow(StudioWindow):
         self._plan_changed()
 
     def _plan_from_controls(self, seed: int = 0) -> Plan:
+        timing = {k: b.value() for k, b in self.time_box.items()}
+        if self.makeup:
+            m = self.makeup["meta"]
+            fixed = tuple(c.label for c in self.makeup["trials"])
+            p = Plan(sets=1, reps=1, seed=seed, gestures=tuple(sorted(set(fixed))), fixed=fixed,
+                     gesture_set=m.get("gesture_set", "basic"), **timing)
+            shown = {int(k): v for k, v in (m.get("label_names_shown") or {}).items()}
+            self.names = {**p.gset.names, **shown}
+            self.hints = p.gset.hints
+            self.keys = p.gset.labels
+            return p
         _label, gset, ids, names = PRESETS[self.preset.currentData()]
         p = Plan(sets=self.sets_box.value(), reps=self.reps_box.value(), seed=seed, gestures=tuple(ids),
-                 gesture_set=gset, **{k: b.value() for k, b in self.time_box.items()})
+                 gesture_set=gset, **timing)
         self.names = {**p.gset.names, **names}
         self.hints = p.gset.hints
         self.keys = p.gset.labels
@@ -258,6 +287,12 @@ class RecordWindow(StudioWindow):
         dur = f"약 {secs / 60:.0f}분" if secs >= 90 else f"약 {secs:.0f}초"
         gest = ", ".join(self.names[i] for i in p.gestures)
         self._fill_gallery(p.gestures)
+        if self.makeup:
+            src = os.path.basename(self.makeup["folder"])
+            self.info.setText(f"보충 녹화: {src}에서 고른 시도 {n}개({', '.join(self.names[i] for i in p.fixed)})를 "
+                              f"랜덤 순서로 한 번씩 다시 녹화합니다 ({dur}). 시간 설정은 원본 세션과 같게 맞췄습니다. "
+                              "새 세션 폴더로 저장되고, meta.json의 makeup_of에 원본의 어느 시도를 대신하는지 적힙니다.")
+            return
         self.info.setText(f"동작 {len(p.gestures)}개({gest})가 랜덤 순서로 나옵니다. "
                           f"한 번에 준비 {p.ready_s:g}초 → 유지 {p.hold_s:g}초 → 휴식 {p.rest_s:g}초, "
                           f"동작마다 {p.reps}회씩 {p.sets}세트 (총 {n}회, {dur}"
@@ -279,6 +314,7 @@ class RecordWindow(StudioWindow):
                 old.deleteLater()
         for i in ids:
             cell = QWidget()
+            cell.setFixedSize(100, 108)
             cv = QVBoxLayout(cell)
             cv.setContentsMargins(0, 0, 0, 0)
             cv.setSpacing(0)
@@ -286,12 +322,67 @@ class RecordWindow(StudioWindow):
             pic.setFixedSize(84, 84)
             pic.set_gesture(self.keys[i], TEXT)
             pic.setToolTip(self.hints[i])
-            cv.addWidget(pic)
+            cv.addWidget(pic, 0, Qt.AlignHCenter)
             lbl = QLabel(self.names[i])
             lbl.setAlignment(Qt.AlignCenter)
             cv.addWidget(lbl)
             self.gallery.addWidget(cell)
         self.gallery.addStretch(1)
+
+    def _pick_makeup(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "보충할 세션 폴더", self.rec.root)
+        if not folder:
+            return
+        need = ("meta.json", "emg.npz", "prompts.npz")
+        if not all(os.path.exists(os.path.join(folder, f)) for f in need):
+            QMessageBox.warning(self, "보충 녹화", "세션 폴더가 아닙니다 (meta.json, emg.npz, prompts.npz 필요).")
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            sc = check_session(folder)
+        except Exception as ex:    # a broken or foreign folder should not take the window down
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "보충 녹화", f"세션을 분석하지 못했습니다: {ex}")
+            return
+        QApplication.restoreOverrideCursor()
+        if sc.meta.get("gesture_set", "basic") not in GESTURE_SETS:
+            QMessageBox.warning(self, "보충 녹화", f"알 수 없는 동작 세트: {sc.meta.get('gesture_set')}")
+            return
+        dlg = MakeupDialog(sc, self)
+        if dlg.exec() and dlg.selected():
+            self._set_makeup({"folder": folder, "meta": sc.meta, "trials": dlg.selected()})
+
+    def _set_makeup(self, mk: dict | None) -> None:
+        self.makeup = mk
+        for w in (self.preset, self.reps_box, self.sets_box):
+            w.setVisible(mk is None)      # the makeup list replaces the preset, reps and sets
+        self.makeup_clear.setVisible(mk is not None)
+        if mk:
+            plan = mk["meta"].get("plan", {})
+            for key, b in self.time_box.items():
+                if key in plan:
+                    b.setValue(plan[key])
+            if not self.name.text().strip():
+                self.name.setText(mk["meta"].get("participant", ""))
+            self.makeup_lbl.setText(f"{os.path.basename(mk['folder'])} · {len(mk['trials'])}개 시도")
+        else:
+            self.makeup_lbl.setText("")
+        self._plan_changed()
+
+    def _makeup_meta(self) -> dict | None:
+        """Which original trial each trial of this session replaces, in the order they will be shown."""
+        if not self.makeup:
+            return None
+        pool: dict[int, list] = {}
+        for c in self.makeup["trials"]:
+            pool.setdefault(c.label, []).append(c)
+        replaces = []
+        for label in self.runner.order[0]:
+            c = pool[label].pop(0)
+            replaces.append({"set": c.set, "trial": c.trial, "label": c.label, "rep": c.rep,
+                             "reasons": c.reasons + c.doubts})
+        return {"session": os.path.basename(self.makeup["folder"]),
+                "participant": self.makeup["meta"].get("participant", ""), "replaces": replaces}
 
     def _run_page(self) -> QWidget:
         w = QWidget()
@@ -412,7 +503,7 @@ class RecordWindow(StudioWindow):
         self.plan = self._plan_from_controls(seed=int(time.time()))
         self.runner = Runner(self.plan)
         self.rec.start(self.name.text(), self.note.toPlainText(), self.plan, want_video=self._video_ok(),
-                       shown_names=self.names)
+                       shown_names=self.names, makeup=self._makeup_meta())
         self.pages.setCurrentIndex(1)
         self.runner.start_set(time.perf_counter())
         self._clock.start(10)
@@ -513,6 +604,7 @@ class RecordWindow(StudioWindow):
 
     def _again(self) -> None:
         self.runner = None
+        self._set_makeup(None)
         self.note.clear()
         self.pages.setCurrentIndex(0)
 

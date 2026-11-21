@@ -143,3 +143,100 @@ def test_session_meta_records_the_gesture_set(tmp_path):
     assert meta["gesture_set"] == "puppet" and meta["plan"]["gesture_set"] == "puppet"
     assert meta["labels"]["4"] == "wrist_flex" and meta["label_names_ko"]["2"] == "손 펴기"
     assert meta["label_names_shown"]["2"] == "보" and len(meta["gestures"]) == 7
+
+
+def test_plan_fixed_list_for_makeup():
+    p = Plan(sets=1, reps=1, seed=3, gesture_set="puppet", gestures=(1, 4), fixed=(4, 1, 4))
+    assert p.trials_per_set == 3
+    (seq,) = p.order()
+    assert sorted(seq) == [1, 4, 4] and seq == [4, 1, 4]       # the only order without a repeat
+
+
+def _synthetic_session(folder, gap_trial, wrong_trial):
+    """3 gestures x 4 reps, each gesture a different loud channel; one dropout, one wrong gesture."""
+    fs, rng = 500.0, np.random.default_rng(0)
+    plan = Plan(sets=1, reps=4, seed=1, gesture_set="puppet", gestures=(1, 2, 3))
+    (order,) = plan.order()
+    kinds, ts, trials, labels = [], [], [], []
+    for k, L in enumerate(order):
+        t0 = k * plan.trial_s
+        for kind, off in (("ready", 0), ("hold", plan.ready_s), ("rest", plan.ready_s + plan.hold_s)):
+            kinds.append(kind); ts.append(t0 + off); trials.append(k); labels.append(L)
+    kinds.append("set_end"); ts.append(len(order) * plan.trial_s); trials.append(-1); labels.append(0)
+    t = np.arange(0, ts[-1], 1 / fs)
+    amp = np.full((len(t), 8), 2.0)
+    for k, L in enumerate(order):
+        h0 = k * plan.trial_s + plan.ready_s
+        m = (t >= h0) & (t < h0 + plan.hold_s)
+        done = order[k + 1] if k == wrong_trial else L      # the wrong trial does the next gesture
+        amp[m, (done - 1) * 2] = 25.0
+    emg = np.clip(127 + rng.normal(0, 1, amp.shape) * amp, 0, 255).astype(np.uint8)
+    h0 = gap_trial * plan.trial_s + plan.ready_s
+    keep = ~((t >= h0 + 0.5) & (t < h0 + 2.5))
+    np.savez(os.path.join(folder, "emg.npz"), emg=emg[keep], t=t[keep])
+    np.savez(os.path.join(folder, "prompts.npz"), kind=np.array(kinds), t=np.array(ts), t_plan=np.array(ts),
+             set=np.zeros(len(ts), np.int16), trial=np.array(trials, np.int16), label=np.array(labels, np.int16))
+    meta = {"gesture_set": "puppet", "plan": __import__("dataclasses").asdict(plan), "participant": "x",
+            "label_names_shown": {"0": "휴식", "1": "주먹", "2": "손 펴기", "3": "검지 펴기"}}
+    json.dump(meta, open(os.path.join(folder, "meta.json"), "w", encoding="utf-8"))
+    return order
+
+
+def test_quality_flags_dropout_and_wrong_gesture(tmp_path):
+    from studio.record.quality import check_session
+    order = _synthetic_session(str(tmp_path), gap_trial=2, wrong_trial=5)
+    assert order[5] != order[6]           # plans never repeat a gesture back to back
+    sc = check_session(str(tmp_path))
+    bad = {c.trial: c for c in sc.bad}
+    assert set(bad) == {2, 5}
+    assert "누락" in bad[2].reasons[0] and bad[2].coverage < 0.5
+    assert bad[5].predicted == order[6] and bad[5].own < 0.3
+    assert sc.cv_accuracy > 0.95
+
+
+def test_dataset_keeps_clean_trials_and_valid_makeups(tmp_path):
+    from studio.record.dataset import export
+    from studio.record.protocol import GESTURE_SETS
+    base = tmp_path / "s" / "20260101-100000_a"
+    base.mkdir(parents=True)
+    order = _synthetic_session(str(base), gap_trial=2, wrong_trial=5)
+    gs = GESTURE_SETS["puppet"]
+    meta = json.load(open(base / "meta.json", encoding="utf-8"))
+    meta.update(prompts={"trials_done": len(order)}, labels={str(k): v for k, v in gs.labels.items()},
+                label_names_ko={str(k): v for k, v in gs.names.items()})
+    json.dump(meta, open(base / "meta.json", "w", encoding="utf-8"))
+    # a makeup recorded with the band in place: same synthetic generator, re-doing trial 2 (the dropout)
+    mk = tmp_path / "s" / "20260101-101000_a"
+    mk.mkdir()
+    _synthetic_session(str(mk), gap_trial=99, wrong_trial=99)
+    m2 = dict(meta, makeup_of={"session": base.name, "replaces": [{"set": 0, "trial": 2, "label": order[2]}]})
+    json.dump(m2, open(mk / "meta.json", "w", encoding="utf-8"))
+    info = export(str(tmp_path / "s"), str(tmp_path / "out"))
+    d = np.load(tmp_path / "out" / "emg.npz")
+    # base: 12 trials - dropout (re-recorded) - wrong gesture = 10; makeup: all 12 match the original
+    assert info["trials"] == 22 and len(d["label"]) == 22
+    assert info["session_notes"][mk.name].count("유효") == 1
+    i = 0
+    s = slice(d["offset"][i], d["offset"][i] + d["length"][i])
+    assert d["t"][s][0] < 0 < d["t_rest"][i] < d["t"][s][-1]
+
+
+def test_split_writes_one_file_per_trial_by_category(tmp_path):
+    from studio.record.dataset import split
+    from studio.record.protocol import GESTURE_SETS
+    base = tmp_path / "s" / "20260101-100000_a"
+    base.mkdir(parents=True)
+    order = _synthetic_session(str(base), gap_trial=2, wrong_trial=5)
+    gs = GESTURE_SETS["puppet"]
+    meta = json.load(open(base / "meta.json", encoding="utf-8"))
+    meta.update(prompts={"trials_done": len(order)}, labels={str(k): v for k, v in gs.labels.items()},
+                label_names_ko={str(k): v for k, v in gs.names.items()})
+    json.dump(meta, open(base / "meta.json", "w", encoding="utf-8"))
+    info = split(str(tmp_path / "s"), str(tmp_path / "out"))
+    assert info["files"] == {"정상": 10, "데이터누락": 1, "신호이상": 1}
+    out = tmp_path / "out" / "x"
+    assert len(list((out / "데이터누락").iterdir())) == 1 and len(list((out / "정상").iterdir())) == 10
+    (f,) = (out / "신호이상").iterdir()
+    lines = f.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "t,phase," + ",".join(f"ch{c}" for c in range(1, 9))
+    assert {ln.split(",")[1] for ln in lines[1:]} == {"ready", "hold", "rest"}

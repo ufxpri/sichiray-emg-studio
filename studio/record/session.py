@@ -93,7 +93,7 @@ class SessionRecorder:
 
     # ------------------------------------------------------------ lifecycle (GUI thread)
     def start(self, name: str, note: str, plan: Plan, want_video: bool,
-              shown_names: dict[int, str] | None = None) -> str:
+              shown_names: dict[int, str] | None = None, makeup: dict | None = None) -> str:
         t0_perf, t0_unix = time.perf_counter(), time.time()
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(t0_unix))
         self.folder = os.path.join(self.root, f"{stamp}_{safe_name(name)}")
@@ -116,6 +116,7 @@ class SessionRecorder:
             "label_names_shown": {str(k): v for k, v in {**plan.gset.names, **(shown_names or {})}.items()},
             "gestures": [{"id": g[0], "key": g[1], "name": g[2], "how": g[3]} for g in plan.gset.gestures
                          if g[0] in plan.gestures],
+            "makeup_of": makeup,
             "emg_source": self.link.source_name,
             "emg_mode_at_start": self.link.mode,
             "camera_device": self.camera.device,
@@ -246,6 +247,7 @@ the EMG link and the camera worker; `meta.json` maps it to wall time (`t0_perf` 
 | `video.avi` | every camera frame (MJPG). The fps in its header is nominal; use `video_frames.npz` for frame times |
 | `video_frames.npz` | `t_ns` perf_counter **nanoseconds** of each video frame, `cam_seq` camera frame counter (gaps = frames the camera produced but were not written) |
 | `hand.npz` | WiLoR right-hand estimate per processed frame: `t`, `has_right`, `kp2d` (pixels), `kp3d` (m), `global_orient`, `hand_pose` (MANO axis-angle), `betas`, `det_conf`, `bbox`; NaN where no right hand. Written live (fewer frames than the video, `meta.json` hand.source = "live") or afterwards from `video.avi` by `worker/hand_offline.py` (every frame, `source` = "offline", plus `video_frame_index`). Missing = recorded camera-only and not yet extracted |
+| `meta.json` `makeup_of` | set when this is a makeup recording: `session` the original folder, `replaces[k]` the original trial (`set`, `trial`, `label`, `reasons`) that trial k of this session stands in for |
 | `prompts.npz` | what the screen asked for: `t` shown, `t_plan` scheduled, `kind` (set_start / ready / hold / rest / set_end / abort), `set`, `trial`, `label`; `order` the gesture order per set |
 
 Labels (`label`) depend on the gesture set, `meta.json` `gesture_set`; `labels` maps each id to

@@ -95,6 +95,8 @@ class Plan:
     seed: int = 0
     gestures: tuple[int, ...] = ALL_IDS   # ids from `gesture_set` used in this session
     gesture_set: str = "basic"
+    # makeup recording: exactly these labels (repeats allowed) per set, instead of reps x gestures
+    fixed: tuple[int, ...] = ()
 
     @property
     def gset(self) -> GestureSet:
@@ -106,15 +108,16 @@ class Plan:
 
     @property
     def trials_per_set(self) -> int:
-        return self.reps * len(self.gestures)
+        return len(self.fixed) if self.fixed else self.reps * len(self.gestures)
 
     def order(self) -> list[list[int]]:
         """Gesture ids per set: each gesture `reps` times, shuffled, no immediate repeats."""
         rng = random.Random(self.seed)
         out = []
         for _ in range(self.sets):
-            while True:
-                seq = [g for g in self.gestures for _ in range(self.reps)]
+            base = list(self.fixed) or [g for g in self.gestures for _ in range(self.reps)]
+            for _attempt in range(1000):    # a fixed list may make "no repeats" impossible
+                seq = base[:]
                 rng.shuffle(seq)
                 if len(seq) < 2 or all(a != b for a, b in zip(seq, seq[1:])):
                     break
