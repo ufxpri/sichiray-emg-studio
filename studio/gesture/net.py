@@ -301,3 +301,36 @@ class Stabilizer:
         else:
             self._cand, self._n = None, 0
         return self.shown
+
+
+class KalmanDot:
+    """Constant-velocity Kalman filter for the live map dot (state x, y, vx, vy; one measurement
+    every `dt`). `accel` sets how quickly the dot may change course, `noise` how far apart the
+    raw kNN positions scatter around the true one (map units, the map spans about -1..1)."""
+
+    def __init__(self, dt: float = STEP / FS, accel: float = 1.0, noise: float = 0.3) -> None:
+        self.F = np.eye(4)
+        self.F[0, 2] = self.F[1, 3] = dt
+        g = np.array([[dt ** 2 / 2, 0], [0, dt ** 2 / 2], [dt, 0], [0, dt]])
+        self.Q = g @ g.T * accel ** 2
+        self.H = np.eye(2, 4)
+        self.R = np.eye(2) * noise ** 2
+        self.x: np.ndarray | None = None
+        self.P = np.eye(4)
+
+    def reset(self) -> None:
+        self.x = None
+
+    def update(self, z: np.ndarray) -> np.ndarray:
+        z = np.asarray(z, float)
+        if self.x is None:
+            self.x = np.r_[z, 0.0, 0.0]
+            self.P = np.diag([self.R[0, 0], self.R[1, 1], 1.0, 1.0])
+            return z.copy()
+        x = self.F @ self.x
+        P = self.F @ self.P @ self.F.T + self.Q
+        S = self.H @ P @ self.H.T + self.R
+        K = P @ self.H.T @ np.linalg.inv(S)
+        self.x = x + K @ (z - self.H @ x)
+        self.P = (np.eye(4) - K @ self.H) @ P
+        return self.x[:2].copy()

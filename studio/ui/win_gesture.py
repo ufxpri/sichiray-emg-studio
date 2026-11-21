@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QProgressBar, QPu
                                QWidget)
 
 from .. import config
-from ..gesture.net import FS, GestureNet, LiveDecoder, Stabilizer
+from ..gesture.net import FS, GestureNet, KalmanDot, LiveDecoder, Stabilizer
 from .common import StudioWindow
 from .hand_pic import HandPicture
 from .theme import MUTED, PANEL, TEXT
@@ -31,6 +31,8 @@ UNSURE = 0.5            # below this top probability the decision is shown dimme
 SMOOTHING = [("0.4초 (학습과 같음)", 5), ("0.6초", 7), ("0.8초", 9), ("1.0초", 11)]
 SWITCHING = [("3회 연속·60% 이상 (권장)", 0.6, 3), ("바로 (채터링 있음)", 0.0, 1), ("5회 연속·70% 이상", 0.7, 5)]
 TRAIL = 12              # past map positions drawn as a tail
+# map dot Kalman filter: (label, accel, noise); None = raw kNN position
+DOT_FILTER = [("중 (권장)", 1.0, 0.3), ("약", 3.0, 0.15), ("강", 0.5, 0.3), ("끔", None, None)]
 
 
 def colour(label: int) -> str:
@@ -94,17 +96,26 @@ class SignalMapView(pg.PlotWidget):
         self.addItem(self.ref)
         self.tail = pg.PlotDataItem(pen=pg.mkPen(TEXT, width=1.5))
         self.addItem(self.tail)
+        self.raw = pg.ScatterPlotItem(size=7, pen=None, brush=pg.mkBrush(255, 255, 255, 90))
+        self.addItem(self.raw)
         self.dot = pg.ScatterPlotItem(size=18, pen=pg.mkPen("#ffffff", width=2))
         self.addItem(self.dot)
         self.texts: list[pg.TextItem] = []
         self.empty = pg.TextItem("", color=MUTED, anchor=(0.5, 0.5))
         self.addItem(self.empty)
         self.trail: list[np.ndarray] = []
+        self.kalman: KalmanDot | None = KalmanDot(accel=DOT_FILTER[0][1], noise=DOT_FILTER[0][2])
+
+    def set_filter(self, accel: float | None, noise: float | None) -> None:
+        self.kalman = None if accel is None else KalmanDot(accel=accel, noise=noise)
+        self.trail = []
 
     def set_map(self, net: GestureNet | None) -> None:
         for t in self.texts:
             self.removeItem(t)
         self.texts, self.trail = [], []
+        if self.kalman is not None:
+            self.kalman.reset()
         self.tail.setData([], [])
         self.dot.setData([], [])
         m = net.map if net else None
@@ -129,10 +140,16 @@ class SignalMapView(pg.PlotWidget):
         self.autoRange()
 
     def push(self, xy: np.ndarray, label: int) -> None:
-        self.trail = (self.trail + [xy])[-TRAIL:]
+        """xy: raw kNN position of the newest window. The dot and its tail show the Kalman
+        estimate; the faint small dot the raw position."""
+        cur = xy if self.kalman is None else self.kalman.update(xy)
+        self.trail = (self.trail + [cur])[-TRAIL:]
         tr = np.array(self.trail)
         self.tail.setData(tr[:, 0], tr[:, 1])
-        cur = tr[-3:].mean(0)                           # a little smoothing of the dot itself
+        if self.kalman is None:
+            self.raw.setData([], [])
+        else:
+            self.raw.setData([xy[0]], [xy[1]])
         self.dot.setData([cur[0]], [cur[1]], brush=pg.mkBrush(colour(label)))
 
 
@@ -201,6 +218,15 @@ class GestureWindow(StudioWindow):
             self.switch.addItem(text, (pmin, n))
         self.switch.currentIndexChanged.connect(self._steady)
         steady.addWidget(self.switch)
+        steady.addSpacing(16)
+        steady.addWidget(QLabel("지도 점 칼만 필터"))
+        self.dot_filter = QComboBox()
+        for text, acc, noise in DOT_FILTER:
+            self.dot_filter.addItem(text, (acc, noise))
+        self.dot_filter.setToolTip("지도 위 점의 떨림을 줄입니다. 강할수록 부드럽지만 늦게 따라갑니다. "
+                                   "흐린 작은 점은 필터 전 위치입니다.")
+        self.dot_filter.currentIndexChanged.connect(lambda: self.map.set_filter(*self.dot_filter.currentData()))
+        steady.addWidget(self.dot_filter)
         steady.addStretch(1)
         hint = QLabel("판정이 떨리면 화면 전환 조건을 올리세요 (반응은 그만큼 늦어짐)")
         hint.setStyleSheet(f"color: {MUTED};")
@@ -243,7 +269,7 @@ class GestureWindow(StudioWindow):
         self.map = SignalMapView()
         self.map.setMinimumSize(320, 300)
         centre = QVBoxLayout()
-        mh = QLabel("신호 지도 (학습 창의 t-SNE, 흰 테두리 점 = 지금)")
+        mh = QLabel("신호 지도 (학습 창의 t-SNE, 흰 테두리 점 = 지금, 흐린 점 = 필터 전)")
         mh.setStyleSheet(f"color: {MUTED};")
         centre.addWidget(mh)
         centre.addWidget(self.map, 1)

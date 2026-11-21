@@ -147,3 +147,15 @@ def test_replay_source_plays_recorded_bytes_at_their_pace(tmp_path):
         got += src.read()
     assert got == blob and time.perf_counter() - t0 >= 0.14       # not faster than recorded
     assert src.prompt()[:2] == ("rest", "휴식")
+
+
+def test_kalman_dot_smooths_jitter_and_follows_a_jump():
+    r = np.random.default_rng(7)
+    k = gn.KalmanDot()
+    z = np.r_[np.zeros(40), np.ones(40)]
+    Z = np.c_[z, np.zeros_like(z)] + r.normal(0, 0.12, (80, 2))
+    out = np.array([k.update(v) for v in Z])
+    assert np.std(np.diff(out[15:40, 0])) < 0.5 * np.std(np.diff(Z[15:40, 0]))   # steadier frame to frame
+    assert out[50:, 0].mean() > 0.85                             # caught up within 1 s of the jump
+    k.reset()
+    assert np.allclose(k.update(np.array([0.3, -0.2])), [0.3, -0.2])
