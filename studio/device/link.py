@@ -16,6 +16,7 @@ import numpy as np
 from ..core.ring import ByteLog, Ring
 from .clock import ClockAligner
 from .demo import DemoSource
+from .replay import ReplaySource
 from .parsers import AsciiParser, HexParser
 from .protocol import CH, LinkState
 from .sources import ByteSource, SerialSource, SourceError
@@ -64,6 +65,15 @@ class Link:
 
     def open_demo(self, mode: str = "hex") -> None:
         self.open(DemoSource(mode))
+
+    def open_replay(self, folder: str) -> None:
+        """Play a recorded session (its received bytes, at their original pace)."""
+        self.open(ReplaySource(folder))
+
+    @property
+    def replay(self) -> ReplaySource | None:
+        src = self._source
+        return src if isinstance(src, ReplaySource) else None
 
     def close(self) -> None:
         if self._stop is not None:

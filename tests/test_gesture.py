@@ -126,3 +126,24 @@ def test_signal_map_places_reference_points_on_themselves():
     new = centres + r.normal(0, 0.3, (3, 64))          # unseen windows of each class
     got = m.place(new)
     assert np.allclose(got, [[-1, 0], [1, 0], [0, 1]], atol=0.1)
+
+
+def test_replay_source_plays_recorded_bytes_at_their_pace(tmp_path):
+    import json
+    import time
+    from studio.device.replay import ReplaySource
+    blob = bytes(range(200))
+    arr = np.array([10.0, 10.05, 10.10, 10.15])
+    np.savez(tmp_path / "emg.npz", chunk_arrival=arr, chunk_offset=np.array([0, 50, 100, 150]),
+             chunk_len=np.array([50, 50, 50, 50]))
+    (tmp_path / "emg_bytes.bin").write_bytes(blob)
+    np.savez(tmp_path / "prompts.npz", kind=np.array(["ready", "hold", "rest"]), t=np.array([10.0, 10.05, 10.12]),
+             label=np.array([2, 2, 2]))
+    json.dump({"label_names_shown": {"0": "휴식", "2": "손 펴기"}}, open(tmp_path / "meta.json", "w", encoding="utf-8"))
+    src = ReplaySource(str(tmp_path), speed=1.0)
+    src.open()
+    got, t0 = b"", time.perf_counter()
+    while not src.finished and time.perf_counter() - t0 < 2:
+        got += src.read()
+    assert got == blob and time.perf_counter() - t0 >= 0.14       # not faster than recorded
+    assert src.prompt()[:2] == ("rest", "휴식")

@@ -218,10 +218,16 @@ class GestureWindow(StudioWindow):
         self.sub = QLabel()
         self.sub.setAlignment(Qt.AlignCenter)
         self.sub.setStyleSheet(f"color: {MUTED};")
+        self.truth = QLabel()
+        self.truth.setAlignment(Qt.AlignCenter)
+        f2 = QFont(self.font())
+        f2.setPointSize(13)
+        self.truth.setFont(f2)
         left = QVBoxLayout()
         left.addWidget(self.pic, 1)
         left.addWidget(self.big)
         left.addWidget(self.sub)
+        left.addWidget(self.truth)
         self.bars = ProbBars()
         right = QVBoxLayout()
         self.bars_head = head = QLabel("동작별 확률 (최근 0.4초 평균)")
@@ -372,6 +378,23 @@ class GestureWindow(StudioWindow):
         self.cal_state.setText(self.calib_note or ("보정 전: 학습 때 기준 사용 (부정확)" if not p.windows else ""))
         self.cal_state.setStyleSheet(f"color: {'#ffd43b' if not p.windows else MUTED};")
 
+    def _show_truth(self) -> None:
+        """When playing a recording: what the screen asked for at that moment."""
+        rp = self.hub.link.replay
+        pr = rp.prompt() if rp is not None and self.calib is None else None
+        if pr is None:
+            self.truth.setText("")
+            return
+        kind, name, since = pr
+        what = {"ready": "준비", "hold": "유지", "rest": "휴식"}.get(kind, kind)
+        shown = self.big.text().rstrip("?")
+        target = name if kind in ("hold", "ready") else "휴식"
+        ok = kind == "hold" and since > 0.5 and shown == target or kind == "rest" and since > 0.5 and shown == "휴식"
+        bad = kind in ("hold", "rest") and since > 0.8 and shown != target
+        col = "#69db7c" if ok else "#ff8787" if bad else MUTED
+        self.truth.setText(f"녹화 당시 안내: {name} ({what} {since:.1f}초)")
+        self.truth.setStyleSheet(f"color: {col};")
+
     # ------------------------------------------------------------ live
     def on_mode_change(self) -> None:
         self.pos = 0
@@ -414,6 +437,7 @@ class GestureWindow(StudioWindow):
             self.sub.setText(f"확률 {100 * pr:.0f}%" + ("  ·  불확실" if not sure else "")
                              + (f"  ·  지금 창은 {names[d.label]} 쪽" if d.label != lab else ""))
             self.bars.set(self._names(), d.proba)
+        self._show_truth()
         stale = self.last is not None and (s.t.total == 0 or time.perf_counter() - self.last.t > 1.0)
         parts = [self.mode_text()]
         if not ok_rate and self.hub.mode:

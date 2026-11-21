@@ -7,9 +7,10 @@ import sys
 
 from . import theme  # noqa: F401  (sets the Qt binding for pyqtgraph before it is imported)
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import (QApplication, QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-                               QMainWindow, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout,
+                               QLabel, QMainWindow, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
+from .. import config
 from ..core.hub import Hub
 from ..device.protocol import LinkState
 from ..device.sources import find_ch340, list_ports
@@ -126,10 +127,16 @@ class Launcher(QMainWindow):
             self.port.addItem(f"{dev}  ★ 암밴드 동글 (CH340)" if dev in ch340 else f"{dev}  {desc}", dev)
         for label, mode in DEMO.items():
             self.port.addItem(label, f"demo:{mode}")
+        self.port.addItem("녹화 세션 재생…", "replay:")
         self.port.setCurrentIndex(next((i for i in range(self.port.count()) if self.port.itemData(i) in ch340), 0))
 
     def connect_to(self, target: str) -> None:
-        if target.startswith("demo:"):
+        if target.startswith("replay:"):
+            folder = target[7:] or QFileDialog.getExistingDirectory(
+                self, "재생할 세션 폴더", os.path.join(config.DATA_DIR, "sessions"))
+            if folder:
+                self.hub.link.open_replay(folder)
+        elif target.startswith("demo:"):
             self.hub.link.open_demo(target[5:])
         else:
             self.hub.link.open_serial(target)
@@ -179,6 +186,7 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="EMG Studio")
     ap.add_argument("--port", help="COM port to open at start")
     ap.add_argument("--demo", choices=["hex", "ascii"], help="start the synthetic device")
+    ap.add_argument("--replay", help="play this recorded session folder as if the band were on")
     ap.add_argument("--camera", type=int, help="start the hand worker on this camera index")
     ap.add_argument("--camera-video", default="", help="test: feed the hand worker from this video file")
     ap.add_argument("--camera-only", action="store_true",
@@ -195,7 +203,9 @@ def main(argv: list[str] | None = None) -> None:
     hub = Hub()
     win = Launcher(hub, guide=not args.no_guide)
     win.show()
-    if args.demo:
+    if args.replay:
+        win.connect_to(f"replay:{args.replay}")
+    elif args.demo:
         win.connect_to(f"demo:{args.demo}")
     elif args.port:
         win.connect_to(args.port)
