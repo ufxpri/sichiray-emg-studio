@@ -122,6 +122,32 @@ python -m pytest tests
 고르면 됩니다. 창에 끌어다 놓아도 됩니다. 설치나 변환 없이 영상 프레임과 오른손 관절, EMG 8채널, 동작 안내를 한 시간축에 맞춰
 보여 주고, EMG 끊김·기기 시계 리셋·영상 fps·손 인식률·안내 지연 같은 점검 항목도 요약합니다. 파일은 브라우저 안에서만 읽습니다.
 
+### 녹화 데이터 정리 (보충 녹화 · 품질 판정 · 데이터셋)
+
+- **보충 녹화:** 녹화 창의 **[이전 세션 보충 녹화…]**로 세션을 고르면 EMG가 끊긴 시도와 신호가 다른 동작처럼 보이는 시도를 찾아 주고, 고른 시도만 다시 녹화합니다.
+- **품질 판정:** `py -3.12 -m studio.record.quality data\sessions\<세션>`
+- **정상 시도만 모은 데이터셋:** `py -3.12 -m studio.record.dataset --out data\datasets\<이름>`
+- **시도별 파일로 나누기 (사람별 정상 / 데이터누락 / 신호이상):** `py -3.12 -m studio.record.dataset --split --out data\datasets\<이름>`
+
+### 실시간 손동작 판정
+
+녹화한 정상 시도로 CNN(필터 → 0.2초 창 → 채널 세기 정규화 → 1D CNN + AdaBN → 0.4초 평활)을 학습하고,
+**실시간 손동작 판정** 창에서 지금 하는 동작을 손 모양 그림과 확률 막대로 보여 줍니다. 학습에만 PyTorch가 필요하고
+(아래는 Python 3.13에 설치된 경우), 스튜디오는 저장된 가중치를 numpy로 계산하므로 PyTorch 없이 돌아갑니다.
+
+```bash
+# 학습: 사람 이름 또는 all. --eval 은 착용 하나씩 빼고 평가해 "새로 찼을 때" 정확도를 모델에 기록
+py -3.13 -m studio.gesture.train --who 조승준 --eval          # -> data/models/gesture/조승준.npz
+
+# 밴드 없이 시험: 녹화 세션을 실시간처럼 흘려 판정 (공정하게 보려면 그 착용을 --exclude 로 빼고 학습한 모델로)
+py -3.13 -m studio.gesture.train --who 조승준 --exclude 111826 --out data/models/gesture/test.npz
+py -3.12 -m studio.gesture.replay data/sessions/20261121-111826_조승준 --model data/models/gesture/test.npz
+```
+
+창에서 모델을 고르고 **[착용 보정 시작]**을 누른 뒤 약 40초 동안 그림대로 쉬기와 동작을 합니다. 정답 없이 이 신호로
+채널 세기와 신경망 내부 기준(AdaBN)만 다시 잡습니다. 밴드를 새로 찰 때마다 다시 하세요. HEX 500 Hz 모드에서만 동작하며,
+판정은 손을 바꾼 뒤 약 0.2초 늦게 따라옵니다.
+
 ## 하드웨어 참고 사항 (Hardware Specs & Known Issues)
 
 <img src="assets/armband_channels.jpg" alt="채널 번호 라벨을 붙인 8채널 밴드. 5번 셀에 USB-C 포트와 녹색 LED가 있다" width="480">
@@ -146,7 +172,8 @@ sichiray-emg-studio/
 │   ├── core/              # 링 버퍼, 필터 파이프라인, 노이즈 분석
 │   ├── hand/              # 카메라 링크, 스켈레톤, MANO 손 모델
 │   ├── pose/              # 특징 추출, 데이터셋 수집, 학습(Ridge/MLP)과 평가
-│   ├── record/            # 손동작 녹화: 랜덤 세션 진행, 세션 폴더 저장
+│   ├── record/            # 손동작 녹화: 랜덤 세션 진행, 세션 폴더 저장, 보충 녹화, 품질 판정, 데이터셋 내보내기
+│   ├── gesture/           # 실시간 손동작 판정: CNN 학습(PyTorch), numpy 추론, 세션 재생 시험
 │   └── ui/                # PySide6 UI 컴포넌트와 OpenGL 뷰어
 ├── viewer/                # 녹화 세션 뷰어 (HTML 한 파일)
 ├── tests/                 # 회귀 테스트

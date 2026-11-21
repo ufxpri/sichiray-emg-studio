@@ -17,6 +17,7 @@ from .common import STATE_LABEL
 from .guide import WearGuide
 from .win_camera import CameraWindow
 from .win_filter import FilterWindow
+from .win_gesture import GestureWindow
 from .win_hand3d import Hand3DWindow
 from .win_info import InfoWindow
 from .win_raw import RawWindow
@@ -25,6 +26,7 @@ from .win_spectro import SpectroWindow
 
 WINDOWS = {
     "record": (RecordWindow, "손동작 녹화", "이름·실험 노트 입력 후 랜덤 손동작 세션 녹화 (EMG·영상·관절 원본)"),
+    "gesture": (GestureWindow, "실시간 손동작 판정", "학습한 CNN으로 지금 손동작을 판정 (착용 보정 후)"),
     "camera": (CameraWindow, "카메라 손 인식", "웹캠 + GPU 손 관절 오버레이 (WiLoR, 별도 프로세스)"),
     "hand3d": (Hand3DWindow, "3D 손 · EMG 복원", "EMG 복원 손과 카메라 손 비교, 현장 학습"),
     "raw": (RawWindow, "EMG 원시 데이터", "수신한 값 그대로 8채널 + IMU"),
